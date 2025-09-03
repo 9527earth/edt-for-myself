@@ -1,547 +1,276 @@
 import { connect } from 'cloudflare:sockets';
 
+// ==================== 可调参数 ====================
+const CONNECT_TIMEOUT_MS = 3000; // TCP 连接超时（毫秒）
+const WS_BATCH_SIZE = 10;       // WS->Socket 合并消息数量，可根据负载调整
+
 // ==================== 配置管理 ====================
 class Config {
   constructor(env, url) {
-    // 核心参数
     this.userId = env?.USER_ID || '123456';
     this.uuid = env?.UUID || 'aaa6b096-1165-4bbe-935c-99f4ec902d02';
     this.nodeName = env?.NODE_NAME || 'IKUN-Vless';
+    
     this.bestIPs = this.parseList(env?.BEST_IPS) || [
       'developers.cloudflare.com',
-      'ip.sb',
-      'www.visa.cn'
+      'ip.sb', 
+      'www.visa.cn',
+      'ikun.glimmer.cf.090227.xyz'
     ];
-    this.proxyIP = url?.searchParams.get('proxyip') || env?.PROXY_IP || '';
     
-    // 安全控制
-    this.allowPorts = this._parseNumberList(env?.ALLOW_PORTS || '443,8443,2053,2083,2087,2096');
-    this.denyPorts = this._parseNumberList(env?.DENY_PORTS || '25,110,143,465,587');
-    this.allowHosts = this.parseList(env?.ALLOW_HOSTS);
-
-    // 性能参数 - 均衡配置
-    this.directTimeout = parseInt(env?.DIRECT_TIMEOUT) || 1500;
-    this.proxyTimeout = parseInt(env?.PROXY_TIMEOUT) || 3000;
-    this.nat64Timeout = parseInt(env?.NAT64_TIMEOUT) || 5000;
-    this.writeTimeout = parseInt(env?.WRITE_TIMEOUT) || 8000;
-    this.maxConnections = parseInt(env?.MAX_CONNECTIONS) || 50;
-
-    this.uuidBytes = this._parseUUID(this.uuid);
-  }
-
-  _parseUUID(uuid) {
-    const hex = uuid.replace(/-/g, '');
-    const bytes = new Uint8Array(16);
-    for (let i = 0; i < 16; i++) {
-      bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
-    }
-    return bytes;
-  }
-
-  _parseNumberList(val) {
-    if (!val) return null;
-    return val.split(/[,\n]+/).map(s => parseInt(s.trim())).filter(n => Number.isFinite(n));
-  }
-
-  parseList(val) {
-    if (!val) return null;
-    if (typeof val === 'string') {
-      return val.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
-    }
-    return val;
-  }
-}
-
-// ==================== 连接计数器 ====================
-let activeConnections = 0;
-
-// ==================== 辅助函数 ====================
-const textDecoder = new TextDecoder();
-const textEncoder = new TextEncoder();
-
-function isIPv4(host) {
-  if (typeof host !== 'string') return false;
-  const parts = host.split('.');
-  if (parts.length !== 4) return false;
-  for (const p of parts) {
-    if (!/^\d+$/.test(p)) return false;
-    const n = Number(p);
-    if (!Number.isInteger(n) || n < 0 || n > 255) return false;
-  }
-  return true;
-}
-
-function isIPv6(host) {
-  return host && typeof host === 'string' && host.includes(':');
-}
-
-function ipv4ToNat64(ip) {
-  const parts = ip.split('.').map(n => Number(n));
-  const hex = parts.map(n => n.toString(16).padStart(2, '0')).join('');
-  return `2001:67c:2960:6464::${hex.slice(0, 4)}:${hex.slice(4)}`;
-}
-
-function compareUUIDs(a, b) {
-  if (!a || !b || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= (a[i] ^ b[i]);
-  return diff === 0;
-}
-
-function isPrivateIP(ip) {
-  if (isIPv4(ip)) {
-    const p = ip.split('.').map(n => Number(n));
-    return p[0] === 10 || p[0] === 127 || 
-           (p[0] === 169 && p[1] === 254) || 
-           (p[0] === 192 && p[1] === 168) || 
-           (p[0] === 172 && p[1] >= 16 && p[1] <= 31);
-  }
-  if (isIPv6(ip)) {
-    const a = ip.toLowerCase();
-    return a === '::1' || a.startsWith('fe80:') || a.startsWith('fc') || a.startsWith('fd');
-  }
-  return false;
-}
-
-function portAllowed(port, config) {
-  if (!Number.isFinite(port) || port <= 0 || port > 65535) return false;
-  if (config.denyPorts && config.denyPorts.includes(port)) return false;
-  if (!config.allowPorts || config.allowPorts.length === 0) return true;
-  return config.allowPorts.includes(port);
-}
-
-function hostAllowed(host, config) {
-  if (!host) return false;
-  if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1);
-  if (isPrivateIP(host)) return false;
-  if (config.allowHosts && config.allowHosts.length > 0) {
-    return config.allowHosts.some(allowed => 
-      allowed === host || host.endsWith('.' + allowed)
+    this.proxyIP = url?.searchParams.get('proxyip') || env?.PROXY_IP || 'sjc.o00o.ooo:443';
+    this.enableNAT64 = env?.ENABLE_NAT64 === 'true';
+    
+    // 预处理 UUID 为字节数组
+    this.uuidBytes = new Uint8Array(
+      this.uuid.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16))
     );
   }
-  return true;
-}
-
-// ==================== VLESS 解析 ====================
-function parseVlessHeader(buffer) {
-  if (!buffer || buffer.length < 18) throw new Error('Invalid VLESS header');
-  const uuid = buffer.subarray(1, 17);
-  const optLen = buffer[17];
-  let idx = 18 + optLen;
-  if (buffer.length < idx + 3) throw new Error('Incomplete VLESS header');
-
-  const cmd = buffer[idx]; idx++;
-  const port = (buffer[idx] << 8) | buffer[idx + 1]; idx += 2;
-  const addrType = buffer[idx++];
-
-  let addr;
-  if (addrType === 1) {
-    if (buffer.length < idx + 4) throw new Error('Incomplete IPv4 address');
-    addr = `${buffer[idx]}.${buffer[idx + 1]}.${buffer[idx + 2]}.${buffer[idx + 3]}`;
-    idx += 4;
-  } else if (addrType === 2) {
-    const domainLen = buffer[idx++];
-    if (buffer.length < idx + domainLen) throw new Error('Incomplete domain address');
-    addr = textDecoder.decode(buffer.subarray(idx, idx + domainLen));
-    idx += domainLen;
-  } else if (addrType === 3) {
-    if (buffer.length < idx + 16) throw new Error('Incomplete IPv6 address');
-    const parts = new Array(8);
-    for (let i = 0; i < 8; i++) {
-      const off = idx + i * 2;
-      parts[i] = ((buffer[off] << 8) | buffer[off + 1]).toString(16);
-    }
-    addr = parts.join(':');
-    idx += 16;
-  } else {
-    throw new Error(`Invalid address type: ${addrType}`);
+  
+  parseList(val) {
+    return typeof val === 'string' ? val.split('\n').filter(Boolean) : val;
   }
-
-  return { uuid, port, address: addr, addressType: addrType, initialData: buffer.subarray(idx) };
 }
 
 // ==================== 连接管理 ====================
-async function connectWithTimeout(target, timeout) {
-  let socket = null;
-  const timeoutPromise = new Promise((_, reject) => 
-    setTimeout(() => reject(new Error(`Connect timeout (${timeout}ms)`)), timeout)
-  );
+async function fastConnect(hostname, port, config) {
+  const attempts = [];
 
-  try {
-    socket = await Promise.race([
-      connect(target),
-      timeoutPromise
-    ]);
-    if (socket.opened) await socket.opened;
-    return socket;
-  } catch (err) {
-    // 确保失败的连接被清理
-    if (socket && typeof socket.close === 'function') {
-      try { socket.close(); } catch (e) {}
-    }
-    throw err;
+  // 直接尝试连接
+  attempts.push(() => connect({ hostname, port }));
+
+  // 使用代理 IP（若配置了 proxyIP）
+  if (config.proxyIP) {
+    const [proxyHost, proxyPort = port] = config.proxyIP.split(':');
+    attempts.push(() => connect({ hostname: proxyHost, port: +proxyPort }));
   }
+
+  // NAT64兜底（仅限 IPv4 地址时）
+  if (config.enableNAT64 && /^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
+    const nat64Host = hostname.split('.')
+      .map(n => (+n).toString(16).padStart(2, '0'))
+      .join('');
+    attempts.push(() => connect({ 
+      hostname: `[2001:67c:2960:6464::${nat64Host.slice(0,4)}:${nat64Host.slice(4)}]`, 
+      port 
+    }));
+  }
+
+  // 依次尝试，快速超时失败后切换
+  for (const attempt of attempts) {
+    try {
+      const socket = await Promise.race([
+        attempt(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), CONNECT_TIMEOUT_MS))
+      ]);
+      await socket.opened;
+      return socket;
+    } catch {
+      continue;
+    }
+  }
+
+  throw new Error('Connection failed');
 }
 
-async function fastConnect(hostname, port, config) {
-  const errors = [];
+// ==================== 协议处理 ====================
+function parseVlessHeader(buffer) {
+  const view = new DataView(buffer.buffer);
+  const uuid = buffer.slice(1, 17);
+  const optLen = buffer[17];
+  const portIdx = 18 + optLen + 1;
+  const port = view.getUint16(portIdx);
+  const addrType = buffer[portIdx + 2];
+  let addr, addrLen, addrIdx = portIdx + 3;
   
-  // 直连尝试
-  try {
-    console.log(`Direct connection to ${hostname}:${port}`);
-    const socket = await connectWithTimeout({ hostname, port }, config.directTimeout);
-    console.log('Direct connection successful');
-    return socket;
-  } catch (err) {
-    errors.push(`Direct: ${err.message}`);
+  switch (addrType) {
+    case 1: // IPv4
+      addr = buffer.slice(addrIdx, addrIdx + 4).join('.');
+      addrLen = 4;
+      break;
+    case 2: // 域名
+      addrLen = buffer[addrIdx++];
+      addr = new TextDecoder().decode(buffer.slice(addrIdx, addrIdx + addrLen));
+      break;
+    case 3: // IPv6
+      addrLen = 16;
+      const parts = [];
+      for (let i = 0; i < 8; i++) {
+        parts.push(view.getUint16(addrIdx + i * 2).toString(16));
+      }
+      addr = parts.join(':');
+      break;
+    default:
+      throw new Error('Invalid address type');
   }
-
-  // 代理连接
-  if (config.proxyIP) {
-    try {
-      const [proxyHost, proxyPortRaw] = config.proxyIP.split(':');
-      const proxyPort = proxyPortRaw ? Number(proxyPortRaw) : port;
-      console.log(`Proxy connection via ${proxyHost}:${proxyPort}`);
-      
-      const socket = await connectWithTimeout({ hostname: proxyHost, port: proxyPort }, config.proxyTimeout);
-      console.log('Proxy connection successful');
-      return socket;
-    } catch (err) {
-      errors.push(`Proxy: ${err.message}`);
-    }
-  }
-
-  // NAT64兜底 - 仅IPv4
-  if (isIPv4(hostname)) {
-    try {
-      const nat64Host = ipv4ToNat64(hostname);
-      console.log(`NAT64 connection to ${nat64Host}:${port}`);
-      
-      const socket = await connectWithTimeout({ hostname: nat64Host, port }, config.nat64Timeout);
-      console.log('NAT64 connection successful');
-      return socket;
-    } catch (err) {
-      errors.push(`NAT64: ${err.message}`);
-    }
-  }
-
-  throw new Error(`All connection attempts failed: ${errors.join('; ')}`);
+  
+  return { uuid, port, address: addr, addressType: addrType, initialData: buffer.slice(addrIdx + addrLen) };
 }
 
 // ==================== 数据传输 ====================
-async function writeWithTimeout(writer, chunk, timeout) {
-  const writePromise = writer.write(chunk);
-  const timeoutPromise = new Promise((_, reject) => 
-    setTimeout(() => reject(new Error('Write timeout')), timeout)
-  );
-  return Promise.race([writePromise, timeoutPromise]);
-}
-
-async function streamTransfer(ws, socket, initialData, config) {
+async function streamTransfer(ws, socket, initialData) {
   const writer = socket.writable.getWriter();
-  let transferActive = true;
   
-  // 设置传输超时保护
-  const transferTimeout = setTimeout(() => {
-    transferActive = false;
-    cleanup();
-  }, 300000); // 5分钟超时
-
-  const cleanup = () => {
-    transferActive = false;
-    clearTimeout(transferTimeout);
-    try { writer.close(); } catch (e) {}
-    try { if (socket?.close) socket.close(); } catch (e) {}
-    try { if (ws?.close) ws.close(); } catch (e) {}
-    activeConnections = Math.max(0, activeConnections - 1);
-  };
-
-  try {
-    // 发送连接确认
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(new Uint8Array([0, 0]));
-    }
-
-    // 发送初始数据
-    if (initialData && initialData.length > 0) {
-      await writeWithTimeout(writer, initialData, config.writeTimeout);
-    }
-
-    // 双向数据传输
-    const transfers = [
-      handleWSToSocket(ws, writer, config, () => transferActive),
-      handleSocketToWS(socket, ws, () => transferActive)
-    ];
-
-    await Promise.allSettled(transfers);
-  } catch (err) {
-    console.error('Stream transfer error:', err);
-  } finally {
-    cleanup();
+  // 立即响应成功
+  ws.send(new Uint8Array([0, 0]));
+  
+  // 写入初始数据
+  if (initialData?.length > 0) {
+    await writer.write(initialData);
   }
-}
-
-async function handleWSToSocket(ws, writer, config, isActive) {
-  return new Promise((resolve, reject) => {
-    let closed = false;
-
-    const messageHandler = async (evt) => {
-      if (!isActive() || closed) return;
-      try {
-        let chunk;
-        const data = evt.data;
-        
-        if (typeof data === 'string') {
-          chunk = textEncoder.encode(data);
-        } else if (data instanceof ArrayBuffer) {
-          chunk = new Uint8Array(data);
-        } else if (data instanceof Blob) {
-          const ab = await data.arrayBuffer();
-          chunk = new Uint8Array(ab);
-        } else {
-          chunk = new Uint8Array(data);
+  
+  // 并行双向传输
+  await Promise.allSettled([
+    // WS -> Socket
+    (async () => {
+      const queue = [];
+      let processing = false;
+      
+      ws.addEventListener('message', async ({ data }) => {
+        queue.push(new Uint8Array(data));
+        if (!processing) {
+          processing = true;
+          while (queue.length > 0) {
+            // 从队列取出批量消息进行合并写入
+            const batch = queue.splice(0, WS_BATCH_SIZE);
+            const merged = new Uint8Array(batch.reduce((acc, arr) => acc + arr.length, 0));
+            let offset = 0;
+            for (const arr of batch) {
+              merged.set(arr, offset);
+              offset += arr.length;
+            }
+            try {
+              await writer.write(merged);
+              // 写入后稍微让出事件循环，降低 CPU 持续使用
+              await new Promise(r => setTimeout(r, 0));
+            } catch {
+              break;
+            }
+          }
+          processing = false;
         }
+      });
 
-        await writeWithTimeout(writer, chunk, config.writeTimeout);
-      } catch (err) {
-        cleanup();
-        reject(err);
-      }
-    };
-
-    const closeHandler = () => { cleanup(); resolve(); };
-    const errorHandler = (err) => { cleanup(); reject(err); };
+      // WS 关闭时，关闭 Socket 写入端
+      ws.addEventListener('close', () => {
+        try { writer.close(); } catch {}
+      });
+    })(),
     
-    const cleanup = () => {
-      if (closed) return;
-      closed = true;
-      try {
-        ws.removeEventListener('message', messageHandler);
-        ws.removeEventListener('close', closeHandler);
-        ws.removeEventListener('error', errorHandler);
-      } catch (e) {}
-    };
-
-    ws.addEventListener('message', messageHandler);
-    ws.addEventListener('close', closeHandler);
-    ws.addEventListener('error', errorHandler);
-  });
-}
-
-async function handleSocketToWS(socket, ws, isActive) {
-  const reader = socket.readable.getReader();
-  try {
-    while (isActive()) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (ws.readyState !== WebSocket.OPEN) break;
-      try { 
-        ws.send(value); 
-      } catch (err) { 
-        console.error('Failed to send to WebSocket:', err);
-        break; 
+    // Socket -> WS
+    socket.readable.pipeTo(new WritableStream({
+      write: chunk => {
+        try {
+          ws.send(chunk);
+        } catch {
+          // 如果发送失败，例如 WS 关闭，则终止管道
+          ws.close();
+        }
+      },
+      abort: () => {
+        ws.close();
       }
-    }
-  } catch (err) {
-    console.error('Socket read error:', err);
-  } finally {
-    try { reader.releaseLock(); } catch (e) {}
-  }
+    }))
+  ]);
+
+  // 如果远端 Socket 关闭，则关闭 WebSocket
+  socket.closed.then(() => {
+    try { ws.close(); } catch {}
+  });
 }
 
 // ==================== WebSocket 处理 ====================
 async function handleWebSocket(request, config) {
-  // 连接数限制
-  if (activeConnections >= config.maxConnections) {
-    console.log(`Connection limit exceeded: ${activeConnections}/${config.maxConnections}`);
-    return new Response('Service temporarily unavailable', { status: 503 });
-  }
-
-  const upgradeHeader = request.headers.get('Upgrade');
-  if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
-    return new Response('Bad Request', { status: 400 });
-  }
-
-  const protocolHeader = request.headers.get('sec-websocket-protocol') || '';
-  if (!protocolHeader) return new Response('Missing protocol', { status: 400 });
-
-  const protocols = protocolHeader.split(',').map(s => s.trim()).filter(Boolean);
-  if (protocols.length === 0) return new Response('Invalid protocol', { status: 400 });
-
-  let protocolData;
-  try {
-    const base64 = protocols[0].replace(/-/g, '+').replace(/_/g, '/');
-    protocolData = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-  } catch {
-    return new Response('Invalid protocol encoding', { status: 400 });
-  }
-
-  let vless;
-  try { 
-    vless = parseVlessHeader(protocolData); 
-  } catch (err) { 
-    return new Response(`Protocol error: ${err.message}`, { status: 400 }); 
-  }
-
-  const { uuid, port, address, initialData } = vless;
-
-  // 验证检查
-  if (!compareUUIDs(uuid, config.uuidBytes)) {
+  const protocol = request.headers.get('sec-websocket-protocol');
+  if (!protocol) return new Response('Bad Request', { status: 400 });
+  
+  // 解码并解析 VLESS 协议头
+  const protocolData = Uint8Array.from(
+    atob(protocol.replace(/-/g, '+').replace(/_/g, '/')),
+    c => c.charCodeAt(0)
+  );
+  const { uuid, port, address, addressType, initialData } = parseVlessHeader(protocolData);
+  
+  // 验证 UUID
+  if (!uuid.every((b, i) => b === config.uuidBytes[i])) {
     return new Response('Unauthorized', { status: 403 });
   }
-  if (!portAllowed(port, config)) {
-    return new Response('Port not allowed', { status: 403 });
-  }
-  if (!hostAllowed(address, config)) {
-    return new Response('Host not allowed', { status: 403 });
-  }
-
-  // 增加活跃连接计数
-  activeConnections++;
-
+  
   // 建立目标连接
-  let socket;
-  try {
-    const targetHost = (address.startsWith('[') && address.endsWith(']')) ? 
-      address.slice(1, -1) : address;
-    socket = await fastConnect(targetHost, port, config);
-  } catch (err) {
-    activeConnections = Math.max(0, activeConnections - 1);
-    console.error(`Connection to ${address}:${port} failed:`, err);
-    return new Response('Connection failed', { status: 502 });
-  }
-
-  // 创建WebSocket对
+  const socket = await fastConnect(
+    addressType === 3 ? `[${address}]` : address,
+    port,
+    config
+  );
+  
+  // 创建 WebSocket 隧道
   const [client, server] = new WebSocketPair();
   server.accept();
-
+  
   // 启动数据传输
-  streamTransfer(server, socket, initialData, config).catch(err => {
-    console.error('Stream transfer error:', err);
+  streamTransfer(server, socket, initialData);
+  
+  return new Response(null, { 
+    status: 101, 
+    webSocket: client 
   });
-
-  return new Response(null, { status: 101, webSocket: client });
 }
 
 // ==================== 页面生成 ====================
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, m =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
-}
-
 function generateHTML(config, host) {
-  const subLink = `https://${host}/${config.userId}/vless`;
-  const nodeLink = `vless://${config.uuid}@${config.bestIPs[0] || host}:443?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=%2F%3Fed%3D2560#${encodeURIComponent(config.nodeName)}`;
-
+  const escapeHtml = (str) => str.replace(/[&<>"']/g, m => 
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m])
+  );
+  
   return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>VLESS Config</title>
+  <title>VLESS</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: system-ui, sans-serif;
-      background: linear-gradient(135deg, #667eea, #764ba2);
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      padding: 20px;
-    }
-    .container {
-      background: rgba(255, 255, 255, 0.95);
-      border-radius: 16px;
-      padding: 32px;
-      max-width: 600px;
-      width: 100%;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2);
-    }
-    h1 { text-align: center; color: #333; margin-bottom: 24px; }
-    .info-item { 
-      background: #f8f9fa; 
-      padding: 16px; 
-      border-radius: 12px; 
-      margin-bottom: 16px;
-    }
-    .label { font-size: 13px; color: #666; margin-bottom: 6px; }
-    .value { font-family: monospace; color: #333; word-break: break-all; }
-    .copy-box {
-      background: #f8f9fa;
-      border: 2px solid #e9ecef;
-      border-radius: 12px;
-      padding: 16px;
-      position: relative;
-      margin: 12px 0;
-    }
-    .copy-text {
-      font-family: monospace;
-      font-size: 13px;
-      word-break: break-all;
-      padding-right: 80px;
-    }
-    .copy-btn {
-      position: absolute;
-      right: 12px;
-      top: 50%;
-      transform: translateY(-50%);
-      background: #667eea;
-      color: white;
-      border: none;
-      padding: 8px 16px;
-      border-radius: 8px;
-      cursor: pointer;
-    }
-    .stats {
-      text-align: center;
-      margin-top: 20px;
-      color: #666;
-      font-size: 14px;
-    }
+    /* 样式略 */ 
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>🚀 VLESS Config</h1>
-    
-    <div class="info-item">
-      <div class="label">节点名称</div>
-      <div class="value">${escapeHtml(config.nodeName)}</div>
-    </div>
-    
-    <div class="info-item">
-      <div class="label">订阅链接</div>
-      <div class="copy-box">
-        <div class="copy-text" id="sub-link">${subLink}</div>
-        <button class="copy-btn" onclick="copyText('sub-link', this)">复制</button>
+    <h1>🚀 VLESS</h1>
+    <div class="info">
+      <div class="item">
+        <div class="label">节点名称</div>
+        <div class="value">${escapeHtml(config.nodeName)}</div>
+      </div>
+      <div class="item">
+        <div class="label">用户ID</div>
+        <div class="value">${escapeHtml(config.userId)}</div>
+      </div>
+      <div class="item">
+        <div class="label">代理IP</div>
+        <div class="value">${escapeHtml(config.proxyIP)}</div>
       </div>
     </div>
-
-    <div class="info-item">
-      <div class="label">节点链接</div>
-      <div class="copy-box">
-        <div class="copy-text" id="node-link">${nodeLink}</div>
-        <button class="copy-btn" onclick="copyText('node-link', this)">复制</button>
-      </div>
+    <h3>订阅链接</h3>
+    <div class="box">
+      <div class="text" id="s">https://${escapeHtml(host)}/${escapeHtml(config.userId)}/vless</div>
+      <button class="btn" onclick="copyText('s', this)">复制</button>
     </div>
-
-    <div class="stats">
-      活跃连接: ${activeConnections}/${config.maxConnections}
+    <h3>节点链接</h3>
+    <div class="box">
+      <div class="text" id="n">vless://${escapeHtml(config.uuid)}@${escapeHtml(config.bestIPs[0] || host)}:443?encryption=none&security=tls&type=ws&host=${escapeHtml(host)}&sni=${escapeHtml(host)}&path=%2F%3Fed%3D2560#${escapeHtml(config.nodeName)}</div>
+      <button class="btn" onclick="copyText('n', this)">复制</button>
     </div>
   </div>
-
   <script>
-    async function copyText(elementId, button) {
-      try {
-        const text = document.getElementById(elementId).textContent;
-        await navigator.clipboard.writeText(text);
-        button.textContent = '✓ 已复制';
-        setTimeout(() => button.textContent = '复制', 2000);
-      } catch (err) {
-        button.textContent = '复制失败';
-        setTimeout(() => button.textContent = '复制', 2000);
-      }
+    function copyText(id, btn) {
+      navigator.clipboard.writeText(document.getElementById(id).textContent).then(() => {
+        const originalText = btn.textContent;
+        btn.textContent = '✓';
+        btn.classList.add('ok');
+        setTimeout(() => {
+          btn.textContent = originalText;
+          btn.classList.remove('ok');
+        }, 1000);
+      });
     }
   </script>
 </body>
@@ -549,12 +278,10 @@ function generateHTML(config, host) {
 }
 
 function generateVlessConfig(host, config) {
-  return [...(config.bestIPs || []), host]
-    .map(ip => {
-      const [addr, port = 443] = ip.split(':');
-      return `vless://${config.uuid}@${addr}:${port}?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=%2F%3Fed%3D2560#${encodeURIComponent(config.nodeName)}`;
-    })
-    .join('\n');
+  return [...config.bestIPs, `${host}:443`].map(ip => {
+    const [addr, port = 443] = ip.split(':');
+    return `vless://${config.uuid}@${addr}:${port}?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=%2F%3Fed%3D2560#${config.nodeName}`;
+  }).join('\n');
 }
 
 // ==================== 主入口 ====================
@@ -562,39 +289,32 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const config = new Config(env, url);
-    const host = request.headers.get('Host') || url.host;
-
+    const host = request.headers.get('Host');
+    
     try {
-      // WebSocket升级请求
-      if ((request.headers.get('Upgrade') || '').toLowerCase() === 'websocket') {
+      // WebSocket 请求
+      if (request.headers.get('Upgrade') === 'websocket') {
         return await handleWebSocket(request, config);
       }
-
-      // HTTP路由
-      if (url.pathname === `/${config.userId}`) {
-        return new Response(generateHTML(config, host), {
-          headers: { 
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'public, max-age=3600'
-          }
-        });
+      
+      // 页面请求
+      switch (url.pathname) {
+        case `/${config.userId}`:
+          return new Response(generateHTML(config, host), {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' }
+          });
+          
+        case `/${config.userId}/vless`:
+          return new Response(generateVlessConfig(host, config), {
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+          });
+          
+        default:
+          return new Response('Not Found', { status: 404 });
       }
-
-      if (url.pathname === `/${config.userId}/vless`) {
-        return new Response(generateVlessConfig(host, config), {
-          headers: { 
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Cache-Control': 'public, max-age=1800'
-          }
-        });
-      }
-
-      return new Response('Not Found', { status: 404 });
-
-    } catch (err) {
-      console.error('Worker error:', err);
-      return new Response('Internal Server Error', { status: 500 });
+    } catch (error) {
+      console.error('Error:', error);
+      return new Response(`Error: ${error.message}`, { status: 500 });
     }
   }
 };
-

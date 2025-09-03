@@ -41,10 +41,14 @@
 | 变量名 | 说明 | 默认值 | 示例 |
 |--------|------|--------|------|
 | `USER_ID` | 用户ID（访问路径） | `123456` | `abc123` |
-| `UUID` | VLESS UUID | `aaa6b096-...` | 自定义UUID |
-| `BEST_IPS` | CF优选IP列表 | `developers.cloudflare.com` | 多行IP列表 |
-| `PROXY_IP` | 反代IP地址 | `sjc.o00o.ooo:443` | `proxy.com:443` |
-| `NODE_NAME` | 节点名称 | `CF-vless` | `我的节点` |
+| `UUID` | VLESS UUID | `aaa6b096-1165-4bbe-935c-99f4ec902d02` | `自定义UUID` |
+| `NODE_NAME` | 节点名称 | `IKUN-Vless` | `我的节点` |
+| `FALLBACK_DOMAIN` | 伪装域名 | `example.com` | `google.com` |
+| `BEST_IPS` | CF优选IP/域名列表（多行） | `developers.cloudflare.com`<br>`ip.sb` | 多行IP或域名 |
+| `PROXY_IP` | 反代IP | `sjc.o00o.ooo:443` | `proxy.com:443` |
+| `SOCKS5_URI` | SOCKS5 | `socks5://123:123@54.193.123.84:1080` | `socks5://user:pass@host:port` |
+| `GLOBAL_SOCKS5` | 是否启用全局SOCKS5 | `false` | `true` / `false` |
+（当socks5与proxyip同时设置时，则优先使用socks5）
 
 ### 多IP配置示例
 

@@ -30,7 +30,7 @@ class Config {
     this.proxyIP = url?.searchParams.get('proxyip') || env?.PROXY_IP || 'sjc.o00o.ooo:443';
     
     // SOCKS5 配置 (支持 socks5://user:pass@host:port 格式)
-    this.socks5URI = env?.SOCKS5_URI || 'socks5://123:123@54.193.123.84:1080';
+    this.socks5URI = env?.SOCKS5_URI || '';
     this.globalSocks5 = String(env?.GLOBAL_SOCKS5 || 'false').toLowerCase() === 'true';
     this.socks5Config = this.parseSocks5URI(this.socks5URI);
     

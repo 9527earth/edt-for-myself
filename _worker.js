@@ -38,7 +38,7 @@ class Config {
       socks5URI = gsocks5Param;
       globalSocks5 = true; // gsocks5 参数自动启用全局模式
     } else {
-      // 处理普通 socks5 参数
+      // 处理普通 socks5 参数  SOCKS5 配置 (支持 socks5://user:pass@host:port 格式)
       const socks5Param = url?.searchParams.get('socks5');
       socks5URI = socks5Param || env?.SOCKS5_URI || 'socks5://123:123@54.193.123.84:1080';
       globalSocks5 = String(env?.GLOBAL_SOCKS5 || 'false').toLowerCase() === 'true';

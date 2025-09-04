@@ -29,9 +29,23 @@ class Config {
     
     this.proxyIP = url?.searchParams.get('proxyip') || env?.PROXY_IP || 'sjc.o00o.ooo:443';
     
-    // SOCKS5 配置 (支持 socks5://user:pass@host:port 格式)
-    this.socks5URI = env?.SOCKS5_URI || '';
-    this.globalSocks5 = String(env?.GLOBAL_SOCKS5 || 'false').toLowerCase() === 'true';
+    // SOCKS5 配置处理 - 支持URL参数覆盖
+    let socks5URI, globalSocks5;
+    
+    // 处理 gsocks5 参数（全局SOCKS5）
+    const gsocks5Param = url?.searchParams.get('gsocks5');
+    if (gsocks5Param) {
+      socks5URI = gsocks5Param;
+      globalSocks5 = true; // gsocks5 参数自动启用全局模式
+    } else {
+      // 处理普通 socks5 参数
+      const socks5Param = url?.searchParams.get('socks5');
+      socks5URI = socks5Param || env?.SOCKS5_URI || 'socks5://123:123@54.193.123.84:1080';
+      globalSocks5 = String(env?.GLOBAL_SOCKS5 || 'false').toLowerCase() === 'true';
+    }
+    
+    this.socks5URI = socks5URI;
+    this.globalSocks5 = globalSocks5;
     this.socks5Config = this.parseSocks5URI(this.socks5URI);
     
     // 存储原始环境变量用于显示
@@ -200,7 +214,11 @@ async function streamTransfer(ws, socket, initialData) {
 }
 
 // ==================== WebSocket 处理 ====================
-async function handleWebSocket(request, config) {
+async function handleWebSocket(request, env) {
+  // 为WebSocket连接重新创建配置，确保URL参数生效
+  const url = new URL(request.url);
+  const config = new Config(env, url);
+  
   const protocol = request.headers.get('sec-websocket-protocol');
   if (!protocol) return new Response('Bad Request', { status: 400 });
   const protocolData = Uint8Array.from(atob(protocol.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
@@ -240,10 +258,29 @@ function generateHTML(config, host) {
 </div><script>function copyText(id,btn){navigator.clipboard.writeText(document.getElementById(id).textContent).then(()=>{const t=btn.textContent;btn.textContent='✓';btn.classList.add('ok');setTimeout(()=>{btn.textContent=t;btn.classList.remove('ok')},1000)})}</script></body></html>`;
 }
 
-function generateVlessConfig(host, config) {
+function generateVlessConfig(host, config, url) {
+  // 构建路径参数，包含原有的ed参数和新的动态参数
+  const params = new URLSearchParams();
+  params.set('ed', '2560');
+  
+  // 添加URL参数到路径中以确保参数传递到WebSocket连接
+  if (url) {
+    if (url.searchParams.get('gsocks5')) {
+      params.set('gsocks5', url.searchParams.get('gsocks5'));
+    } else if (url.searchParams.get('socks5')) {
+      params.set('socks5', url.searchParams.get('socks5'));
+    }
+    if (url.searchParams.get('proxyip')) {
+      params.set('proxyip', url.searchParams.get('proxyip'));
+    }
+  }
+  
+  const pathWithParams = `/?${params.toString()}`;
+  const encodedPath = encodeURIComponent(pathWithParams);
+  
   return [...config.bestIPs, `${host}:443`].map(ip => {
     const [addr, port = 443] = ip.split(':');
-    return `vless://${config.uuid}@${addr}:${port}?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=%2F%3Fed%3D2560#${config.nodeName}`;
+    return `vless://${config.uuid}@${addr}:${port}?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=${encodedPath}#${config.nodeName}`;
   }).join('\n');
 }
 
@@ -251,15 +288,26 @@ function generateVlessConfig(host, config) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const config = new Config(env, url);
     const host = request.headers.get('Host');
+    
     try {
-      if (request.headers.get('Upgrade') === 'websocket') return await handleWebSocket(request, config);
+      // 优先处理 WebSocket 升级请求
+      if (request.headers.get('Upgrade') === 'websocket') {
+        return await handleWebSocket(request, env);
+      }
+      
+      // 处理 HTTP 请求
+      const config = new Config(env, url);
+      
       switch (url.pathname) {
         case `/${config.userId}`:
-          return new Response(generateHTML(config, host), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+          return new Response(generateHTML(config, host), { 
+            headers: { 'Content-Type': 'text/html; charset=utf-8' } 
+          });
         case `/${config.userId}/vless`:
-          return new Response(generateVlessConfig(host, config), { headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
+          return new Response(generateVlessConfig(host, config, url), { 
+            headers: { 'Content-Type': 'text/plain; charset=utf-8' } 
+          });
         case '/':
           const fallbackUrl = new URL(request.url);
           fallbackUrl.hostname = config.fallbackDomain;

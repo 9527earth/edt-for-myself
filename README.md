@@ -96,9 +96,11 @@ SOCKS5 配置格式：
 /socks5://user:pass@host:port  
 /socks://user:pass@host:port
 /socks://dXNlcjpwYXNzd29yZA==@host:port
+/?s5=socks5://user:pass@host:port 或/?socks5=...
+
 全局socks5
-/gsocks5://user:pass@host:port
-/gs5://user:pass@host:port
+/?gs5=...或/?gsocks5=...或/?s5=...&gsocks5=true
+
 ```
 proxyip
 

@@ -38,16 +38,16 @@
 
 ## ⚙️ 环境变量配置
 
-| 变量名 | 说明 | 默认值 | 示例 |
+| 变量名 | 必需 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `USER_ID` | 用户ID（访问路径） | `123456` | `abc123` |
-| `UUID` | VLESS UUID | `aaa6b096-1165-4bbe-935c-99f4ec902d02` | `自定义UUID` |
-| `NODE_NAME` | 节点名称 | `IKUN-Vless` | `我的节点` |
-| `FALLBACK_DOMAIN` | 伪装域名 | `example.com` | `google.com` |
-| `BEST_IPS` | CF优选IP/域名列表（多行） | `developers.cloudflare.com`<br>`ip.sb` | 多行IP或域名 |
-| `PROXY_IP` | 反代IP | `sjc.o00o.ooo:443` | `proxy.com:443` |
-| `SOCKS5_URI` | SOCKS5 | `socks5://123:123@54.193.123.84:1080` | `socks5://user:pass@host:port` |
-| `GLOBAL_SOCKS5` | 是否启用全局SOCKS5 | `false` | `true` / `false` |
+| `USERID` | ❌ | `ikun` | 订阅路径的用户 ID |
+| `UUID` | ❌ | `4ba0eec8-25e1-4ab3-b188-fd8a70b53984` | VLESS 用户 UUID |
+| `NODE_NAME` | ❌ | `IKUN-vless` | 节点名称 |
+| `URL` | ❌ | `example.com` | 非 WebSocket 请求的回退地址 |
+| `BESTIPS` | ❌ | 见下方 | 优选 IP 列表 |
+| `PROXYIP` | ❌ | - | 代理 IP，格式：`host:port` |
+| `SOCKS5` | ❌ | - | SOCKS5 代理配置 |
+| `GSOCKS5` | ❌ | `false` | 全局 SOCKS5 开关 |
 
 （ps.当socks5与proxyip同时设置时，则优先使用socks5）
 

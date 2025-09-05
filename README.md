@@ -51,46 +51,66 @@
 
 （ps.当socks5与proxyip同时设置时，则优先使用socks5）
 
-### 多IP配置示例
-
-逗号或换行分隔的最优 IP 地址列表：
-
+#### 默认 BESTIPS 列表
 ```
-BEST_IPS=
-www.visa.cn
 ip.sb
-1.1.1.1:443
+www.visa.com
+developers.cloudflare.com
+ikun.glimmer.cf.090227.xyz
 ```
 
-#### PROXY_IP
-格式为 `主机:端口` 的回退代理服务器：
-
-```bash
-PROXY_IP=proxy.example.com:443
-```
-
-## 📖 使用方法
-
-### 访问管理面板
-```
-https://your-worker.workers.dev/123456
-```
+## 📋 使用方法
 
 ### 获取订阅链接
+
+访问以下 URL 获取节点订阅：
+
 ```
-https://your-worker.workers.dev/123456/vless
+https://your-worker-domain.workers.dev/YOUR_USERID
 ```
 
-### 支持URL修改参数
-```
-https://your-worker.workers.dev/123456/vless?proxyip=1.2.3.4:443
-```
-可以支持的参数有?proxyip,?socks5,?gsocks5(全局socks5）
+支持URL修改参数
 
-也可以组合
 ```
-https://your-worker.workers.dev/123456/vless?proxyip=1.2.3.4:443&socks5=socks5://user:pass@host:port
+https://your-worker-domain.workers.dev/YOUR_USERID?proxyip=1.2.3.4:443&s5=...
 ```
+
+支持的格式有
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `proxyip` | 临时代理 IP | `?proxyip=1.1.1.1:443` |
+|  `socks5` | SOCKS5 代理 | `?s5=user:pass@host:1080/?socks5=...` |
+|  `gsocks5` | 全局 SOCKS5 | `?gs5=user:pass@host:1080/?gsocks5=...` |
+|  `gsocks5` | 全局 SOCKS5 | `?s5=user:pass@host:1080&gsocks5=true` |
+
+（返回格式为纯文本，每行一个 `vless://` 链接）
+
+支持path修改参数
+如：
+
+SOCKS5 配置格式：
+
+```bash
+/user:pass@host:port
+/socks5://user:pass@host:port  
+/socks://user:pass@host:port
+/socks://dXNlcjpwYXNzd29yZA==@host:port
+全局socks5
+/gsocks5://user:pass@host:port
+/gs5://user:pass@host:port
+```
+proxyip
+
+```
+/?proxyip=1.2.3.4:443
+```
+组合
+```
+/?proxyip=1.2.3.4:443&s5=...
+```
+格式可参考URL参数修改
+
 
 ## 🔒 安全说明
 

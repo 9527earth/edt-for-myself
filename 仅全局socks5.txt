@@ -1,0 +1,248 @@
+import { connect } from 'cloudflare:sockets';
+
+// === SOCKS5 连接超时（毫秒）===
+const SOCKS5_TIMEOUT = 3000;
+
+export default {
+  async fetch(req, env) {
+    const UUID = (env.UUID || '4ba0eec8-25e1-4ab3-b188-fd8a70b53984').toLowerCase();
+
+    // 仅处理 WebSocket；其他请求直接 204（避免外发导致 522/负载）
+    if (req.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
+      return new Response(null, { status: 204 });
+    }
+
+    const [client, ws] = Object.values(new WebSocketPair());
+    ws.accept();
+
+    // === 解析 SOCKS5 参数（仅四种写法）===
+    const u = new URL(req.url);
+    let raw = u.searchParams.get('socks5') || u.pathname.slice(1) || '';
+    try { raw = decodeURIComponent(raw); } catch {}
+
+    // /socks://BASE64(user:pass)@host:port（先解码）
+    if (raw.startsWith('socks://')) {
+      const body = raw.slice(8); // 去掉 "socks://"
+      const at = body.indexOf('@');
+      if (at <= 0) {
+        ws.close(1008, 'Missing @ in socks://');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      const cred = safeB64Decode(body.slice(0, at));
+      if (!cred) {
+        ws.close(1008, 'Bad base64 credentials');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      raw = `${cred}@${body.slice(at + 1)}`;
+    }
+    // /socks5://user:pass@host:port（如 user:pass 是纯 Base64 则尝试解码；不是就原样）
+    else if (raw.startsWith('socks5://')) {
+      const body = raw.slice(9);
+      const at = body.indexOf('@');
+      if (at <= 0) {
+        ws.close(1008, 'Missing @ in socks5://');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      const maybe = safeB64Decode(body.slice(0, at));
+      raw = maybe ? `${maybe}@${body.slice(at + 1)}` : body;
+    }
+    // /socks5=user:pass@host:port
+    else if (raw.startsWith('socks5=')) {
+      raw = raw.slice(7);
+    }
+    // /?socks5=... 已由 searchParams 处理
+
+    const socks5 = parseSocks5(raw);
+    if (!socks5) {
+      ws.close(1008, 'Invalid SOCKS5 parameter');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    // === 预计算 UUID 字节 ===
+    const uuidBytes = hexUuidToBytes(UUID);
+    if (!uuidBytes) {
+      ws.close(1008, 'Bad UUID');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    let remote = null;
+
+    // === 入站: WS → SOCKS5 ===
+    new ReadableStream({
+      start(ctrl) {
+        ws.addEventListener('message', e => {
+          const d = e.data;
+          if (d instanceof ArrayBuffer || ArrayBuffer.isView(d)) ctrl.enqueue(d);
+          // 丢弃字符串帧，避免 DataView 抛异常
+        });
+        ws.addEventListener('close', () => { try { remote?.close(); } catch {} ; ctrl.close(); });
+        ws.addEventListener('error', () => { try { remote?.close(); } catch {} ; ctrl.close(); });
+      }
+    }).pipeTo(new WritableStream({
+      async write(data) {
+        const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+        // 已建 SOCKS5 → 直接转发
+        if (remote) {
+          const w = remote.writable.getWriter();
+          await w.write(u8);
+          w.releaseLock();
+          return;
+        }
+
+        // 数据过短
+        if (u8.byteLength < 24) return;
+
+        // 校验 UUID（VLESS）
+        for (let i = 0; i < 16; i++) if (u8[1 + i] !== uuidBytes[i]) { ws.close(1008, 'UUID mismatch'); return; }
+
+        // 解析 VLESS 请求头（仅 CONNECT / TCP）
+        const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+        const optLen = view.getUint8(17);
+        const cmd = view.getUint8(18 + optLen);
+        if (cmd !== 1) { ws.close(1003, 'Unsupported command'); return; }
+        let pos = 19 + optLen;
+        const port = view.getUint16(pos);
+        const atyp = view.getUint8(pos + 2);
+        pos += 3;
+
+        let addr = '';
+        if (atyp === 1) { // IPv4
+          addr = `${view.getUint8(pos)}.${view.getUint8(pos + 1)}.${view.getUint8(pos + 2)}.${view.getUint8(pos + 3)}`;
+          pos += 4;
+        } else if (atyp === 2) { // 域名
+          const len = view.getUint8(pos++); 
+          addr = new TextDecoder().decode(u8.subarray(pos, pos + len));
+          pos += len;
+        } else if (atyp === 3) { // IPv6
+          const segs = []; for (let i = 0; i < 8; i++, pos += 2) segs.push(view.getUint16(pos).toString(16));
+          addr = segs.join(':');
+        } else { ws.close(1003, 'Invalid address type'); return; }
+
+        const header = new Uint8Array([u8[0], 0]);
+        const payload = u8.subarray(pos);
+
+        // === 建立 SOCKS5 连接（带超时）===
+        try {
+          remote = await socks5Connect(socks5, addr, port, SOCKS5_TIMEOUT);
+        } catch {
+          ws.close(1011, 'SOCKS5 connect failed');
+          return;
+        }
+
+        // 发送首包
+        const w = remote.writable.getWriter();
+        await w.write(payload);
+        w.releaseLock();
+
+        // 出站: SOCKS5 → WS
+        let sent = false;
+        remote.readable.pipeTo(new WritableStream({
+          write(chunk) {
+            if (ws.readyState !== 1) return;
+            ws.send(sent ? chunk : concat2(header, chunk));
+            sent = true;
+          },
+          close: () => ws.readyState === 1 && ws.close(),
+          abort: () => ws.readyState === 1 && ws.close()
+        })).catch(() => { try { remote?.close(); } catch {}; ws.close(1011, 'Remote error'); });
+      }
+    })).catch(() => { try { remote?.close(); } catch {}; ws.close(1011, 'Pipeline error'); });
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+};
+
+// === SOCKS5 连接（带超时，用户名密码可选）===
+async function socks5Connect(s5, host, port, timeoutMs = SOCKS5_TIMEOUT) {
+  const s = connect({ hostname: s5.host, port: s5.port });
+
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('SOCKS5 connect timeout')), timeoutMs)
+  );
+
+  const task = (async () => {
+    await s.opened;
+    const w = s.writable.getWriter(), r = s.readable.getReader();
+    try {
+      if (s5.user || s5.pass) {
+        await w.write(new Uint8Array([5, 2, 0, 2])); // no-auth + user/pass
+        const m = (await r.read()).value; // [VER, METHOD]
+        if (!m || m[0] !== 5) throw new Error('method ver');
+        if (m[1] === 2) {
+          const ub = new TextEncoder().encode(s5.user || '');
+          const pb = new TextEncoder().encode(s5.pass || '');
+          await w.write(new Uint8Array([1, ub.length, ...ub, pb.length, ...pb]));
+          const au = (await r.read()).value; // [VER, STATUS]
+          if (!au || au[1] !== 0) throw new Error('auth fail');
+        } else if (m[1] !== 0) {
+          throw new Error('no acceptable method');
+        }
+      } else {
+        await w.write(new Uint8Array([5, 1, 0])); // no-auth only
+        await r.read();
+      }
+
+      const db = new TextEncoder().encode(host);
+      await w.write(new Uint8Array([5, 1, 0, 3, db.length, ...db, port >> 8, port & 0xff]));
+      await r.read(); // 忽略 BND
+
+      w.releaseLock(); r.releaseLock(); 
+      return s;
+    } catch (e) {
+      try { w.releaseLock(); r.releaseLock(); } catch {}
+      try { s.close(); } catch {}
+      throw e;
+    }
+  })();
+
+  return Promise.race([task, timeout]);
+}
+
+// === 工具函数（最小必要集）===
+function parseSocks5(raw) {
+  if (!raw) return null;
+  let user = '', pass = '', host = '', port = '1080';
+  const at = raw.indexOf('@');
+  if (at >= 0) {
+    const cred = raw.slice(0, at);
+    const srv  = raw.slice(at + 1);
+    const i = cred.indexOf(':');
+    if (i >= 0) { user = cred.slice(0, i); pass = cred.slice(i + 1); }
+    else { user = cred; }
+    const sp = srv.split(':');
+    host = sp[0] || ''; port = sp[1] || '1080';
+  } else {
+    const sp = raw.split(':');
+    host = sp[0] || ''; port = sp[1] || '1080';
+  }
+  const p = +port;
+  if (!host || Number.isNaN(p) || p < 1 || p > 65535) return null;
+  return { user, pass, host, port: p };
+}
+
+function hexUuidToBytes(uuid) {
+  try {
+    const hex = uuid.replace(/-/g, '');
+    if (hex.length !== 32) return null;
+    const out = new Uint8Array(16);
+    for (let i = 0; i < 16; i++) out[i] = parseInt(hex.slice(i*2, i*2+2), 16);
+    return out;
+  } catch { return null; }
+}
+
+function safeB64Decode(s) {
+  try {
+    let t = s.replace(/-/g, '+').replace(/_/g, '/');
+    while (t.length % 4) t += '=';
+    return atob(t);
+  } catch { return null; }
+}
+
+function concat2(a, b) {
+  const ua = a instanceof Uint8Array ? a : new Uint8Array(a);
+  const ub = b instanceof Uint8Array ? b : new Uint8Array(b);
+  const out = new Uint8Array(ua.length + ub.length);
+  out.set(ua, 0); out.set(ub, ua.length);
+  return out;
+}

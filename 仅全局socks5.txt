@@ -1,56 +1,61 @@
+/**
+ * Cloudflare Worker - VLESS over WS → 全局 SOCKS5 转发
+ *
+ * ✅ 功能说明：
+ * - 仅支持 WebSocket (Upgrade: websocket) 请求
+ * - VLESS UUID 校验通过后：
+ *    - TCP 流量 → 强制走 SOCKS5
+ *    - UDP DNS (CMD=2 且端口=53) → 转发到 Cloudflare DoH (1.1.1.1)
+ * - 非 WebSocket 请求 → 返回提示信息
+ *
+ * ✅ 支持的 SOCKS5 参数格式（path 或 query）：
+ *  1. /socks5=user:pass@host:port
+ *  2. /?socks5=user:pass@host:port
+ *  3. /socks://BASE64(user:pass)@host:port
+ *  4. /socks5://user:pass@host:port
+ *  5. /socks5://BASE64(user:pass)@host:port
+ *
+ * ✅ 手搓节点示例（vless:// 链接）：
+ * vless://<UUID>@<your-worker-domain>:443?encryption=none&security=tls&type=ws&host=<your-worker-domain>&path=/socks5=user:pass@1.2.3.4:1080#MyNode
+ */
+
 import { connect } from 'cloudflare:sockets';
 
-// === SOCKS5 连接超时（毫秒）===
-const SOCKS5_TIMEOUT = 3000;
+const SOCKS5_TIMEOUT = 5000;
 
 export default {
   async fetch(req, env) {
     const UUID = (env.UUID || '4ba0eec8-25e1-4ab3-b188-fd8a70b53984').toLowerCase();
 
-    // 仅处理 WebSocket；其他请求直接 204（避免外发导致 522/负载）
     if (req.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
-      return new Response(null, { status: 204 });
+      return new Response("此服务仅支持 WebSocket + VLESS + SOCKS5", { status: 200 });
     }
 
     const [client, ws] = Object.values(new WebSocketPair());
     ws.accept();
 
-    // === 解析 SOCKS5 参数（仅四种写法）===
+    // === 解析 SOCKS5 参数 ===
     const u = new URL(req.url);
     let raw = u.searchParams.get('socks5') || u.pathname.slice(1) || '';
     try { raw = decodeURIComponent(raw); } catch {}
 
-    // /socks://BASE64(user:pass)@host:port（先解码）
     if (raw.startsWith('socks://')) {
-      const body = raw.slice(8); // 去掉 "socks://"
+      const body = raw.slice(8);
       const at = body.indexOf('@');
-      if (at <= 0) {
-        ws.close(1008, 'Missing @ in socks://');
-        return new Response(null, { status: 101, webSocket: client });
+      if (at > 0) {
+        const cred = safeB64Decode(body.slice(0, at));
+        if (cred) raw = `${cred}@${body.slice(at + 1)}`;
       }
-      const cred = safeB64Decode(body.slice(0, at));
-      if (!cred) {
-        ws.close(1008, 'Bad base64 credentials');
-        return new Response(null, { status: 101, webSocket: client });
-      }
-      raw = `${cred}@${body.slice(at + 1)}`;
-    }
-    // /socks5://user:pass@host:port（如 user:pass 是纯 Base64 则尝试解码；不是就原样）
-    else if (raw.startsWith('socks5://')) {
+    } else if (raw.startsWith('socks5://')) {
       const body = raw.slice(9);
       const at = body.indexOf('@');
-      if (at <= 0) {
-        ws.close(1008, 'Missing @ in socks5://');
-        return new Response(null, { status: 101, webSocket: client });
+      if (at > 0) {
+        const maybe = safeB64Decode(body.slice(0, at));
+        raw = maybe ? `${maybe}@${body.slice(at + 1)}` : body;
       }
-      const maybe = safeB64Decode(body.slice(0, at));
-      raw = maybe ? `${maybe}@${body.slice(at + 1)}` : body;
-    }
-    // /socks5=user:pass@host:port
-    else if (raw.startsWith('socks5=')) {
+    } else if (raw.startsWith('socks5=')) {
       raw = raw.slice(7);
     }
-    // /?socks5=... 已由 searchParams 处理
 
     const socks5 = parseSocks5(raw);
     if (!socks5) {
@@ -58,31 +63,29 @@ export default {
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    // === 预计算 UUID 字节 ===
     const uuidBytes = hexUuidToBytes(UUID);
     if (!uuidBytes) {
       ws.close(1008, 'Bad UUID');
       return new Response(null, { status: 101, webSocket: client });
     }
 
-    let remote = null;
+    let remote = null, udpWriter = null, isDNS = false;
 
-    // === 入站: WS → SOCKS5 ===
     new ReadableStream({
       start(ctrl) {
         ws.addEventListener('message', e => {
-          const d = e.data;
-          if (d instanceof ArrayBuffer || ArrayBuffer.isView(d)) ctrl.enqueue(d);
-          // 丢弃字符串帧，避免 DataView 抛异常
+          if (e.data instanceof ArrayBuffer || ArrayBuffer.isView(e.data)) {
+            ctrl.enqueue(e.data);
+          }
         });
-        ws.addEventListener('close', () => { try { remote?.close(); } catch {} ; ctrl.close(); });
-        ws.addEventListener('error', () => { try { remote?.close(); } catch {} ; ctrl.close(); });
+        ws.addEventListener('close', () => { try { remote?.close(); } catch {}; ctrl.close(); });
+        ws.addEventListener('error', () => { try { remote?.close(); } catch {}; ctrl.close(); });
       }
     }).pipeTo(new WritableStream({
       async write(data) {
         const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
 
-        // 已建 SOCKS5 → 直接转发
+        if (isDNS) return udpWriter?.write(u8);
         if (remote) {
           const w = remote.writable.getWriter();
           await w.write(u8);
@@ -90,39 +93,83 @@ export default {
           return;
         }
 
-        // 数据过短
         if (u8.byteLength < 24) return;
 
-        // 校验 UUID（VLESS）
-        for (let i = 0; i < 16; i++) if (u8[1 + i] !== uuidBytes[i]) { ws.close(1008, 'UUID mismatch'); return; }
+        // === UUID 校验 ===
+        for (let i = 0; i < 16; i++) {
+          if (u8[1 + i] !== uuidBytes[i]) { ws.close(1008, 'UUID mismatch'); return; }
+        }
 
-        // 解析 VLESS 请求头（仅 CONNECT / TCP）
+        // === VLESS 头解析 ===
         const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
         const optLen = view.getUint8(17);
         const cmd = view.getUint8(18 + optLen);
-        if (cmd !== 1) { ws.close(1003, 'Unsupported command'); return; }
         let pos = 19 + optLen;
         const port = view.getUint16(pos);
         const atyp = view.getUint8(pos + 2);
         pos += 3;
 
         let addr = '';
-        if (atyp === 1) { // IPv4
-          addr = `${view.getUint8(pos)}.${view.getUint8(pos + 1)}.${view.getUint8(pos + 2)}.${view.getUint8(pos + 3)}`;
+        if (atyp === 1) {
+          if (pos + 4 > u8.byteLength) { ws.close(1003, 'Invalid IPv4'); return; }
+          addr = `${view.getUint8(pos)}.${view.getUint8(pos+1)}.${view.getUint8(pos+2)}.${view.getUint8(pos+3)}`;
           pos += 4;
-        } else if (atyp === 2) { // 域名
-          const len = view.getUint8(pos++); 
+        } else if (atyp === 2) {
+          const len = view.getUint8(pos++);
+          if (pos + len > u8.byteLength) { ws.close(1003, 'Invalid domain'); return; }
           addr = new TextDecoder().decode(u8.subarray(pos, pos + len));
           pos += len;
-        } else if (atyp === 3) { // IPv6
-          const segs = []; for (let i = 0; i < 8; i++, pos += 2) segs.push(view.getUint16(pos).toString(16));
+        } else if (atyp === 3) {
+          if (pos + 16 > u8.byteLength) { ws.close(1003, 'Invalid IPv6'); return; }
+          const segs = [];
+          for (let i = 0; i < 8; i++, pos += 2) segs.push(view.getUint16(pos).toString(16));
           addr = segs.join(':');
         } else { ws.close(1003, 'Invalid address type'); return; }
 
         const header = new Uint8Array([u8[0], 0]);
         const payload = u8.subarray(pos);
 
-        // === 建立 SOCKS5 连接（带超时）===
+        // === UDP DNS → DoH ===
+        if (cmd === 2) {
+          if (port !== 53) { ws.close(1003, 'UDP not supported'); return; }
+          isDNS = true;
+          let sent = false;
+
+          const { readable, writable } = new TransformStream({
+            transform(chunk, ctrl) {
+              for (let i = 0; i + 2 <= chunk.byteLength;) {
+                const len = new DataView(chunk.buffer, chunk.byteOffset + i, 2).getUint16(0);
+                if (i + 2 + len > chunk.byteLength) break;
+                ctrl.enqueue(chunk.slice(i + 2, i + 2 + len));
+                i += 2 + len;
+              }
+            }
+          });
+
+          readable.pipeTo(new WritableStream({
+            async write(query) {
+              try {
+                const resp = await fetch('https://1.1.1.1/dns-query', {
+                  method: 'POST',
+                  headers: { 'content-type': 'application/dns-message' },
+                  body: query
+                });
+                if (ws.readyState === 1) {
+                  const result = new Uint8Array(await resp.arrayBuffer());
+                  ws.send(new Uint8Array([...(sent?[]:header), result.length>>8, result.length&0xff, ...result]));
+                  sent = true;
+                }
+              } catch {}
+            }
+          }));
+
+          udpWriter = writable.getWriter();
+          return udpWriter.write(payload);
+        }
+
+        // === TCP → 全走 SOCKS5 ===
+        if (cmd !== 1) { ws.close(1003, 'Unsupported command'); return; }
+
         try {
           remote = await socks5Connect(socks5, addr, port, SOCKS5_TIMEOUT);
         } catch {
@@ -130,12 +177,10 @@ export default {
           return;
         }
 
-        // 发送首包
         const w = remote.writable.getWriter();
         await w.write(payload);
         w.releaseLock();
 
-        // 出站: SOCKS5 → WS
         let sent = false;
         remote.readable.pipeTo(new WritableStream({
           write(chunk) {
@@ -153,10 +198,9 @@ export default {
   }
 };
 
-// === SOCKS5 连接（带超时，用户名密码可选）===
-async function socks5Connect(s5, host, port, timeoutMs = SOCKS5_TIMEOUT) {
+// === SOCKS5 连接 ===
+async function socks5Connect(s5, host, port, timeoutMs) {
   const s = connect({ hostname: s5.host, port: s5.port });
-
   const timeout = new Promise((_, reject) =>
     setTimeout(() => reject(new Error('SOCKS5 connect timeout')), timeoutMs)
   );
@@ -166,28 +210,27 @@ async function socks5Connect(s5, host, port, timeoutMs = SOCKS5_TIMEOUT) {
     const w = s.writable.getWriter(), r = s.readable.getReader();
     try {
       if (s5.user || s5.pass) {
-        await w.write(new Uint8Array([5, 2, 0, 2])); // no-auth + user/pass
-        const m = (await r.read()).value; // [VER, METHOD]
-        if (!m || m[0] !== 5) throw new Error('method ver');
-        if (m[1] === 2) {
-          const ub = new TextEncoder().encode(s5.user || '');
-          const pb = new TextEncoder().encode(s5.pass || '');
-          await w.write(new Uint8Array([1, ub.length, ...ub, pb.length, ...pb]));
-          const au = (await r.read()).value; // [VER, STATUS]
-          if (!au || au[1] !== 0) throw new Error('auth fail');
-        } else if (m[1] !== 0) {
-          throw new Error('no acceptable method');
-        }
+        await w.write(new Uint8Array([5, 2, 0, 2]));
+        const methodResp = (await r.read()).value;
+        if (!methodResp || methodResp[1] !== 2) throw new Error('SOCKS5 no auth method');
+
+        const ub = new TextEncoder().encode(s5.user || '');
+        const pb = new TextEncoder().encode(s5.pass || '');
+        await w.write(new Uint8Array([1, ub.length, ...ub, pb.length, ...pb]));
+        const authResp = (await r.read()).value;
+        if (!authResp || authResp[1] !== 0) throw new Error('SOCKS5 auth fail');
       } else {
-        await w.write(new Uint8Array([5, 1, 0])); // no-auth only
-        await r.read();
+        await w.write(new Uint8Array([5, 1, 0]));
+        const methodResp = (await r.read()).value;
+        if (!methodResp || methodResp[1] !== 0) throw new Error('SOCKS5 no accept no-auth');
       }
 
       const db = new TextEncoder().encode(host);
       await w.write(new Uint8Array([5, 1, 0, 3, db.length, ...db, port >> 8, port & 0xff]));
-      await r.read(); // 忽略 BND
+      const connResp = (await r.read()).value;
+      if (!connResp || connResp[1] !== 0) throw new Error('SOCKS5 connect fail');
 
-      w.releaseLock(); r.releaseLock(); 
+      w.releaseLock(); r.releaseLock();
       return s;
     } catch (e) {
       try { w.releaseLock(); r.releaseLock(); } catch {}
@@ -199,7 +242,7 @@ async function socks5Connect(s5, host, port, timeoutMs = SOCKS5_TIMEOUT) {
   return Promise.race([task, timeout]);
 }
 
-// === 工具函数（最小必要集）===
+// === 工具函数 ===
 function parseSocks5(raw) {
   if (!raw) return null;
   let user = '', pass = '', host = '', port = '1080';
@@ -217,7 +260,7 @@ function parseSocks5(raw) {
     host = sp[0] || ''; port = sp[1] || '1080';
   }
   const p = +port;
-  if (!host || Number.isNaN(p) || p < 1 || p > 65535) return null;
+  if (!host || Number.isNaN(p)) return null;
   return { user, pass, host, port: p };
 }
 

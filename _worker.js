@@ -1,19 +1,241 @@
-import{connect}from'cloudflare:sockets';
+import { connect } from 'cloudflare:sockets';
 
-const U='ikun';
-const I='aaa6b096-1165-4bbe-935c-99f4ec902d02';
-const P='sjc.o00o.ooo:443';
-const N='IKUN-Vless';
-const S5='socks5://12349:12349@107.163.195.16:10000';
-const G=false;
-const B=['developers.cloudflare.com','ip.sb','www.visa.cn','ikun.glimmer.cf.090227.xyz'];
-const IB=new Uint8Array(I.replace(/-/g,'').match(/.{2}/g).map(x=>parseInt(x,16)));
+const U = 'ikun';
+const I = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';
+const P = '43.156.116.194:443';
+const N = 'IKUN-Vless';
+const S5 = '';
+const G = false;
+const B = [
+  'developers.cloudflare.com',
+  'ip.sb',
+  'www.visa.cn',
+  'ikun.glimmer.cf.090227.xyz'
+];
 
-const b64u=s=>{if(!s)return new Uint8Array();s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';return Uint8Array.from(atob(s),c=>c.charCodeAt(0))};
-const parse=buf=>{const d=new Uint8Array(buf),o=18+(d[17]||0)+1,pt=(d[o]<<8)|d[o+1];let p=o+3,t=d[o+2],h;if(t===1)h=`${d[p++]}.${d[p++]}.${d[p++]}.${d[p++]}`;else if(t===2){const l=d[p++];h=new TextDecoder().decode(d.subarray(p,p+l));p+=l}else{h=Array.from({length:8},(_,i)=>((d[p+2*i]<<8)|d[p+2*i+1]).toString(16)).join(':');p+=16}return{h,pt,data:d.slice(p)}};
-const s5parse=()=>{const w=S5.slice(9);if(w.includes('@')){const[c,hp]=w.split('@'),[us,ps]=c.split(':'),[h,p=1080]=hp.split(':');return{h,p:+p,us,ps}}const[h,p=1080]=w.split(':');return{h,p:+p,us:'',ps:''}};
-const s5conn=async(th,tp,c)=>{const s=connect({hostname:c.h,port:c.p});await s.opened;const w=s.writable.getWriter(),r=s.readable.getReader();try{await w.write(new Uint8Array([5,2,0,2]));let ar=await r.read();if(!ar||ar.done)throw'Invalid';ar=ar.value;if(ar[0]!==5)throw'Invalid';if(ar[1]===2&&c.us){const ub=new TextEncoder().encode(c.us),pb=new TextEncoder().encode(c.ps);await w.write(new Uint8Array([1,ub.length,...ub,pb.length,...pb]));ar=await r.read();if(!ar||ar.done||ar.value[1]!==0)throw'Auth failed'}else if(ar[1]!==0)throw'Auth not supported';const db=new TextEncoder().encode(th);await w.write(new Uint8Array([5,1,0,3,db.length,...db,tp>>8,tp&255]));ar=await r.read();if(!ar||ar.done||ar.value[1]!==0)throw'Connect failed';w.releaseLock();r.releaseLock();return s}catch(e){try{w.releaseLock();r.releaseLock()}catch{}try{s.close()}catch{}throw e}};
-const s5c=S5?s5parse():null;
-const conn=async(h,pt)=>{const a=[];if(G&&s5c)a.push(()=>s5conn(h,pt,s5c));else{a.push(()=>connect({hostname:h,port:pt}));if(s5c)a.push(()=>s5conn(h,pt,s5c))}if(P){const[ph,pp]=P.split(':');a.push(()=>connect({hostname:ph,port:+pp||pt}))}for(const f of a)try{const s=await f();await s.opened;return s}catch{}throw'All failed'};
-export default{async fetch(r){const host=r.headers.get('Host'),u=new URL(r.url);if(r.headers.get('Upgrade')==='websocket'){const pd=b64u(r.headers.get('sec-websocket-protocol')||'');if(pd.length<18||!pd.slice(1,17).every((b,i)=>b===IB[i]))return new Response('',{status:403});const{h,pt,data}=parse(pd.buffer),s=await conn(h,pt),pair=new WebSocketPair(),c=pair[0],sv=pair[1];sv.accept();const w=s.writable.getWriter();try{sv.send(new Uint8Array([0,0]));if(data&&data.length)await w.write(data)}catch{}sv.addEventListener('message',async e=>{try{if(typeof e.data==='string')await w.write(new TextEncoder().encode(e.data));else await w.write(new Uint8Array(e.data))}catch{}});try{s.readable.pipeTo(new WritableStream({write:chunk=>sv.send(chunk)}))}catch{}return new Response(null,{status:101,webSocket:c})}if(u.pathname===`/${U}/vless`)return new Response([...B,`${host}:443`].map(ip=>{const[a,pt=443]=ip.split(':');return`vless://${I}@${a}:${pt}?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=%2F%3Fed%3D2560#${N}`}).join('\n'));return new Response('')}}
+const IB = new Uint8Array(
+  I.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16))
+);
 
+const encoder = new TextEncoder();
+
+const parse = buf => {
+  const d = new Uint8Array(buf);
+  const o = 18 + (d[17] || 0) + 1;
+  const pt = (d[o] << 8) | d[o + 1];
+  let p = o + 3;
+  const t = d[o + 2];
+  let h;
+  if (t === 1) {
+    h = `${d[p++]}.${d[p++]}.${d[p++]}.${d[p++]}`;
+  } else if (t === 2) {
+    const l = d[p++];
+    h = new TextDecoder().decode(d.subarray(p, p + l));
+    p += l;
+  } else {
+    h = Array.from({ length: 8 }, (_, i) =>
+      ((d[p + 2 * i] << 8) | d[p + 2 * i + 1]).toString(16)
+    ).join(':');
+    p += 16;
+  }
+  return { h, pt, data: d.slice(p) };
+};
+
+const s5parse = s => {
+  if (!s) return null;
+  const w = s.replace(/^socks5:\/\//, '');
+  if (w.includes('@')) {
+    const [c, hp] = w.split('@');
+    const [us, ps] = c.split(':');
+    const [h, p = 1080] = hp.split(':');
+    return { h, p: +p, us, ps };
+  }
+  const [h, p = 1080] = w.split(':');
+  return { h, p: +p, us: '', ps: '' };
+};
+
+const s5conn = async (th, tp, c) => {
+  const s = connect({ hostname: c.h, port: c.p });
+  await s.opened;
+  const w = s.writable.getWriter();
+  const r = s.readable.getReader();
+  try {
+    await w.write(new Uint8Array([5, 2, 0, 2]));
+    let ar = await r.read();
+    if (!ar || ar.done) throw 'Invalid';
+    ar = ar.value;
+    if (ar[0] !== 5) throw 'Invalid';
+    if (ar[1] === 2 && c.us) {
+      const ub = encoder.encode(c.us);
+      const pb = encoder.encode(c.ps || '');
+      await w.write(new Uint8Array([1, ub.length, ...ub, pb.length, ...pb]));
+      ar = await r.read();
+      if (!ar || ar.done || ar.value[1] !== 0) throw 'Auth failed';
+    } else if (ar[1] !== 0) throw 'Auth not supported';
+    const db = encoder.encode(th);
+    await w.write(new Uint8Array([5, 1, 0, 3, db.length, ...db, tp >> 8, tp & 255]));
+    ar = await r.read();
+    if (!ar || ar.done || ar.value[1] !== 0) throw 'Connect failed';
+    w.releaseLock();
+    r.releaseLock();
+    return s;
+  } catch (e) {
+    try {
+      w.releaseLock();
+      r.releaseLock();
+      s.close();
+    } catch {}
+    throw e;
+  }
+};
+
+const b64u = s => {
+  if (!s) return new Uint8Array();
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  try {
+    return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  } catch {
+    return new Uint8Array();
+  }
+};
+
+const validateVlessData = data =>
+  data && data.length >= 18 &&
+  data.slice(1, 17).every((b, i) => b === IB[i]);
+
+export default {
+  async fetch(r) {
+    const host = r.headers.get('Host');
+    const u = new URL(r.url);
+    if (r.headers.get('Upgrade') === 'websocket') {
+      let tcpConn, writer;
+      const tempPath = decodeURIComponent(u.pathname + u.search);
+      const pair = new WebSocketPair();
+      const c = pair[0];
+      const sv = pair[1];
+      sv.accept();
+      const protocolHeader = r.headers.get('sec-websocket-protocol');
+      let protocolData = null;
+      let useProtocolData = false;
+      if (protocolHeader) {
+        const decoded = b64u(protocolHeader);
+        if (validateVlessData(decoded)) {
+          protocolData = decoded;
+          useProtocolData = true;
+        }
+      }
+      if (useProtocolData) {
+        await handleVlessConnection(protocolData, tempPath);
+      }
+      let firstPacket = false;
+      sv.addEventListener('message', async e => {
+        if (!firstPacket) {
+          firstPacket = true;
+          if (useProtocolData) {
+            if (writer) {
+              try {
+                await writer.write(
+                  typeof e.data === 'string' ? encoder.encode(e.data) : new Uint8Array(e.data)
+                );
+              } catch {}
+            }
+            return;
+          }
+          const msgData = typeof e.data === 'string' ? encoder.encode(e.data) : new Uint8Array(e.data);
+          if (!validateVlessData(msgData)) {
+            try { sv.close(1002); } catch {}
+            return;
+          }
+          await handleVlessConnection(msgData, tempPath);
+        } else if (writer) {
+          try {
+            await writer.write(
+              typeof e.data === 'string' ? encoder.encode(e.data) : new Uint8Array(e.data)
+            );
+          } catch {}
+        }
+      });
+      async function handleVlessConnection(vlessData, path) {
+        try {
+          const version = vlessData[0];
+          const { h, pt, data } = parse(vlessData.buffer);
+          let Px = P, S5x = S5, Gx = G;
+          const pMatch = path.match(/p=([^&]*)/);
+          if (pMatch) Px = decodeURIComponent(pMatch[1]);
+          const s5Match = path.match(/s5=([^&]*)/);
+          if (s5Match) S5x = decodeURIComponent(s5Match[1]);
+          const gMatch = path.match(/g=([^&]*)/);
+          if (gMatch) Gx = decodeURIComponent(gMatch[1]) === '1';
+          const s5c = S5x ? s5parse(S5x) : null;
+          const attempts = [];
+          if (Gx && s5c) {
+            attempts.push(() => s5conn(h, pt, s5c));
+          } else {
+            attempts.push(() => connect({ hostname: h, port: pt }));
+            if (s5c) attempts.push(() => s5conn(h, pt, s5c));
+          }
+          if (Px) {
+            const [ph, pp] = Px.split(':');
+            attempts.push(() => connect({ hostname: ph, port: +pp || pt }));
+          }
+          for (const attemptFunc of attempts) {
+            try {
+              tcpConn = await attemptFunc();
+              await tcpConn.opened;
+              break;
+            } catch {}
+          }
+          if (!tcpConn) {
+            try { sv.close(1011); } catch {}
+            return;
+          }
+          writer = tcpConn.writable.getWriter();
+          // 发送握手回应（修正版本号）
+          sv.send(new Uint8Array([version, 0]));
+          if (data && data.length) {
+            await writer.write(data);
+          }
+          const controller = new AbortController();
+          tcpConn.readable.pipeTo(new WritableStream({
+            write(chunk) {
+              try {
+                sv.send(
+                  chunk instanceof Uint8Array ?
+                    chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) :
+                    chunk instanceof ArrayBuffer ? chunk :
+                    new Uint8Array(chunk).buffer
+                );
+              } catch (err) {
+                throw err;
+              }
+            },
+            abort() { try { sv.close(1000); } catch {} },
+            close() { try { sv.close(1000); } catch {} }
+          }), { signal: controller.signal }).catch(() => {
+            try { sv.close(1011); } catch {}
+          });
+          sv.addEventListener('close', async () => {
+            try {
+              controller.abort();
+              writer.releaseLock();
+              if (tcpConn) await tcpConn.close();
+            } catch {}
+          });
+        } catch {
+          try { sv.close(1011); } catch {}
+        }
+      }
+      return new Response(null, { status: 101, webSocket: c });
+    }
+    if (u.pathname === `/${U}/vless`) {
+      return new Response(
+        [...B, `${host}:443`].map(ip => {
+          const [a, pt = 443] = ip.split(':');
+          return `vless://${I}@${a}:${pt}?encryption=none&security=tls&type=ws&host=${host}&sni=${host}&path=%2F%3Fed%3D2560#${N}`;
+        }).join('\n')
+      );
+    }
+    return new Response('');
+  }
+};

@@ -1,6 +1,6 @@
 1.手搓节点格式：
 
-vless://<UUID>@<服务器地址>:<端口>?encryption=none&type=ws&security=tls&host=<域名>&path=<路径>#<备注>
+| vless://<UUID>@<服务器地址>:<端口>?encryption=none&security=tls&sni=<域名>&allowInsecure=1&&type=ws&host=<域名>&path=<路径>#<备注> |
 
 2.代码中的参数说明
 

@@ -18,8 +18,8 @@ rs.pipeTo(new WritableStream({async write(ch){const d=nU8(ch);if(!d.length)retur
 if(rSocket){const w=rSocket.writable.getWriter();try{await w.write(d);}finally{w.releaseLock();}return;}
 const p=pVH(d.buffer,U);if(p.err)throw new Error(p.msg);const{ar,pr,ri,vv,udp}=p;
 if(udp){if(pr!==53)throw new Error('udp only 53');dns=true;const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri),w=await hUDP(sv,vh);uw=w.w.bind(w);if(ip.length)uw(ip);return;}
-const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri);hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>rSocket=s).catch(()=>{safeCloseSocket(rSocket);safeCloseWebSocket(sv);});},
-close(){safeCloseSocket(rSocket);safeCloseWebSocket(sv);},abort(){safeCloseSocket(rSocket);safeCloseWebSocket(sv);}})).catch(()=>{safeCloseSocket(rSocket);safeCloseWebSocket(sv);});
+const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri);hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>rSocket=s).catch(()=>{safeCloseSocket(rSocket);safeCloseWebSocket(sv);});
+},close(){safeCloseSocket(rSocket);safeCloseWebSocket(sv);},abort(){safeCloseSocket(rSocket);safeCloseWebSocket(sv);}})).catch(()=>{safeCloseSocket(rSocket);safeCloseWebSocket(sv);});
 return new Response(null,{status:101,webSocket:cl});}
 
 async function hTCP(a,p,fp,sv,vh,px,s5,gs5){const s5cfg=s5?pS5(s5):null;let socket=null;
@@ -35,7 +35,7 @@ async function r2w(rs,sv,vh){let h=vh;const r=rs.readable.getReader();let sq=Pro
 try{while(true){const rec=await r.read();if(!rec)break;const{value,done}=rec;if(done)break;if(!value)continue;const u=nU8(value);
 if(h){const b=new Uint8Array(h.length+u.length);b.set(h,0);b.set(u,h.length);if(mode===1)safeSend(sv,b);else sq=sq.then(()=>safeSend(sv,b)).catch(()=>{});h=null;}
 else{if(mode===1)safeSend(sv,u);else sq=sq.then(()=>safeSend(sv,u)).catch(()=>{});}}}
-catch(e){safeCloseSocket(rs);safeCloseWebSocket(sv);}finally{try{r.releaseLock();}catch{}if(mode===2)await sq.catch(()=>{});}return true;}
+catch(e){safeCloseSocket(rs);safeCloseWebSocket(sv);}finally{try{r.releaseLock();}catch{}if(mode===2)await sq.catch(()=>{});try{safeCancel(rs.readable);}catch{}try{safeAbort(rs.writable);}catch{}try{safeCloseSocket(rs);}catch{}}return true;}
 
 async function s5conn(h,pt,s5cfg){const s=c({hostname:s5cfg.h,port:s5cfg.pt});let sw=null,sr=null,threw=false;
 try{await s.opened;sw=s.writable.getWriter();sr=s.readable.getReader();const te=new TextEncoder();
@@ -61,6 +61,10 @@ safeSend(sv,out.buffer);}).catch(()=>{}).finally(()=>rd.read().then(proc));}catc
 function safeCloseWebSocket(ws){if(!ws)return;try{ws.close();}catch{}}
 function safeCloseSocket(s){if(!s)return;try{s.close();}catch{}}
 function safeSend(ws,data){if(!ws||data==null)return;try{ws.send(data);}catch{}}
+
+function safeReleaseLock(x){try{if(!x)return;if(typeof x.releaseLock==='function')x.releaseLock();}catch{}}
+function safeCancel(x){try{if(!x)return;if(typeof x.cancel==='function')x.cancel();}catch{}}
+function safeAbort(x){try{if(!x)return;if(typeof x.abort==='function')x.abort();}catch{}}
 
 function pVH(b,uid){if(!b||b.byteLength<24)return{err:1,msg:'invalid header'};const d=new Uint8Array(b),v=d[0];
 const ub=Uint8Array.from(uid.replace(/-/g,'').match(/.{2}/g).map(x=>parseInt(x,16)));for(let i=0;i<16;i++)if(d[1+i]!==ub[i])return{err:1,msg:'uuid mismatch'};

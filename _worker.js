@@ -5,7 +5,7 @@ const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';
 const P = 'sjc.o00o.ooo:443';
 const S5 = '';
 const GS5 = false;
-let mode = 1;
+let mode = 1;//1为管道传输，2为队列传输
 const CT = 30000;
 const HB = 15000;
 

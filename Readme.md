@@ -1,7 +1,8 @@
-##手搓节点格式
+1.手搓节点格式：
 
 vless://<UUID>@<服务器地址>:<端口>?encryption=none&type=ws&security=tls&host=<域名>&path=<路径>#<备注>
 
+2.代码中的参数说明
 
 | 参数     | 说明                           |
 | ------ | ---------------------------- |
@@ -12,7 +13,7 @@ vless://<UUID>@<服务器地址>:<端口>?encryption=none&type=ws&security=tls&h
 | `mode` | 数据传输模式：1=管道传输-快、2=队列传输-稳            |
 | `VER`  | 仅作版本区分，无实际逻辑影响               |
 
-你可以在客户端（V2Ray / Clash 等）里配置 WebSocket 的 path，像这样：
+3.你可以在客户端（V2Ray / Clash 等）里配置 WebSocket 的 path，像这样：
 
 🔹 示例 1：只使用默认配置
 /

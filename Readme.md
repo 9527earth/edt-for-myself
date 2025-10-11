@@ -1,6 +1,15 @@
-1.手搓节点格式：
+1.简要的使用说明
 
- vless://<UUID>@<服务器地址>:<端口>?encryption=none&security=tls&sni=<域名>&allowInsecure=1&&type=ws&host=<域名>&path=<路径>#<备注> 
+ a、订阅链接：https://<部署的域名>/<uid的值>(也可以通过?sub=sub.cmliussss.net快速切换订阅器）
+ 
+ b、手搓节点格式：
+ 
+   vless://@<优选域名或ip>:<端口>?encryption=none&security=tls&sni=<部署的域名>&allowInsecure=1&&type=ws&host=<部署的域名>&path=<路径>#<备注>
+ 
+  c、连接逻辑
+  
+   (1)直连--> s5(如果有） --> p
+   (2)全局：所有流量转发s5（也就是固定节点）
 
 2.代码中的参数说明
 

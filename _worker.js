@@ -1,6 +1,6 @@
 import { connect as c } from 'cloudflare:sockets';
 
-const VER = 'mini-2.6';//版本号,不必在意
+const VER = 'mini-2.6.3';//版本号,不必在意
 const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//UUID
 const P = 'sjc.o00o.ooo:443';//proxyip备用fallback
 const S5 = '';//格式：socks5://user:pass@host:port
@@ -91,31 +91,31 @@ async function vWS(r, px, s5, gs5) {
 async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
   const s5cfg = s5 ? pS5(s5) : null;
   let socket = null;
+  async function tryConnect(connectFn, h, pt) {
+    const s = await connectFn(h, pt);
+    if (fp?.length) {
+      const w = s.writable.getWriter();
+      await w.write(fp);
+      w.releaseLock();
+    }
+    return s;
+  }
   async function connectDirect(h, pt) {
     const s = c({ hostname: h, port: pt });
     await s.opened;
-    if (fp?.length) {
-      const w = s.writable.getWriter();
-      try { await w.write(fp); } finally { w.releaseLock(); }
-    }
     return s;
   }
   async function connectS5(h, pt) {
-    const s = await s5conn(h, pt, s5cfg);
-    if (fp?.length) {
-      const w = s.writable.getWriter();
-      try { await w.write(fp); } finally { w.releaseLock(); }
-    }
-    return s;
+    return await s5conn(h, pt, s5cfg);
   }
   try {
     if (gs5 && s5cfg) {
-      socket = await connectS5(a, p);
+      socket = await tryConnect(connectS5, a, p);
       r2w(socket, sv, vh);
       return socket;
     }
     try {
-      socket = await connectDirect(a, p);
+      socket = await tryConnect(connectDirect, a, p);
       r2w(socket, sv, vh);
       return socket;
     } catch (e1) {
@@ -123,7 +123,7 @@ async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
     }
     if (s5cfg) {
       try {
-        socket = await connectS5(a, p);
+        socket = await tryConnect(connectS5, a, p);
         r2w(socket, sv, vh);
         return socket;
       } catch (e2) {
@@ -131,7 +131,7 @@ async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
       }
     }
     const [ph, pp] = pHP(px, p);
-    socket = await connectDirect(ph, pp);
+    socket = await tryConnect(connectDirect, ph, pp);
     r2w(socket, sv, vh);
     return socket;
   } catch (e) {
@@ -157,18 +157,25 @@ async function throttledSend(sv, data) {
 async function r2w(rs, sv, vh) {
   let h = vh;
   const r = rs.readable.getReader();
-  let sq = Promise.resolve();
+  let sq = Promise.resolve(), closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    try { r.releaseLock(); } catch {}
+    try { rs.readable?.cancel(); } catch {}
+    try { rs.writable?.abort(); } catch {}
+    try { rs?.close(); } catch {}
+    try { sv?.close(); } catch {}
+  };
   try {
     while (true) {
-      const rec = await r.read();
-      if (!rec) break;
-      const { value, done } = rec;
+      const { value, done } = await r.read();
       if (done) break;
       if (!value) continue;
       const u = nU8(value);
       if (h) {
         const b = new Uint8Array(h.length + u.length);
-        b.set(h, 0);
+        b.set(h);
         b.set(u, h.length);
         if (mode === 1) await throttledSend(sv, b);
         else sq = sq.then(() => throttledSend(sv, b));
@@ -181,12 +188,8 @@ async function r2w(rs, sv, vh) {
   } catch (e) {
     if (!e.message?.includes('closed') && !e.message?.includes('aborted')) console.error('[r2w]', e.message);
   } finally {
-    try { r.releaseLock(); } catch {}
     if (mode === 2) await sq.catch(() => {});
-    try { rs.readable?.cancel(); } catch {}
-    try { rs.writable?.abort(); } catch {}
-    try { rs?.close(); } catch {}
-    try { sv?.close(); } catch {}
+    cleanup();
   }
 }
 
@@ -197,33 +200,26 @@ async function s5conn(h, pt, s5cfg) {
     await s.opened;
     sw = s.writable.getWriter();
     sr = s.readable.getReader();
-    const te = new TextEncoder();
     await sw.write(new Uint8Array([5, 2, 0, 2]));
     const arR = await sr.read();
-    if (!arR || arR.done) throw new Error('s5 no auth response');
+    if (!arR?.value || arR.done) throw new Error('s5 no auth response');
     const ar = arR.value;
-    if (ar[1] === 0x02) {
+    if (ar[1] === 2) {
       if (!s5cfg.u || !s5cfg.p) throw new Error('auth required');
-      const apk = new Uint8Array([1, s5cfg.u.length, ...te.encode(s5cfg.u), s5cfg.p.length, ...te.encode(s5cfg.p)]);
-      await sw.write(apk);
+      const user = new TextEncoder().encode(s5cfg.u);
+      const pass = new TextEncoder().encode(s5cfg.p);
+      await sw.write(new Uint8Array([1, user.length, ...user, pass.length, ...pass]));
       const aprR = await sr.read();
-      if (!aprR || aprR.done) throw new Error('s5 auth no response');
+      if (!aprR?.value || aprR.done) throw new Error('s5 auth no response');
       const apr = aprR.value;
-      if (apr[0] !== 0x01 || apr[1] !== 0x00) throw new Error('auth failed');
+      if (apr[1] !== 0) throw new Error('auth failed');
     }
-    let atyp;
-    if (/^(\d{1,3}\.){3}\d{1,3}$/.test(h)) atyp = new Uint8Array([1, ...h.split('.').map(Number)]);
-    else if (/^[0-9a-fA-F:]+$/.test(h)) {
-      const [pf = '', sf = ''] = h.split('::'), pfp = pf.split(':').filter(Boolean), sfp = sf.split(':').filter(Boolean);
-      const pad = 8 - (pfp.length + sfp.length), full = [...pfp, ...Array(pad).fill('0'), ...sfp];
-      const ipb = full.flatMap(f => { const n = parseInt(f || '0', 16); return [(n >> 8) & 0xff, n & 0xff]; });
-      atyp = new Uint8Array([4, ...ipb]);
-    } else atyp = new Uint8Array([3, h.length, ...te.encode(h)]);
-    await sw.write(new Uint8Array([5, 1, 0, ...atyp, pt >> 8, pt & 0xff]));
+    const domain = new TextEncoder().encode(h);
+    await sw.write(new Uint8Array([5, 1, 0, 3, domain.length, ...domain, pt >> 8, pt & 0xff]));
     const resR = await sr.read();
-    if (!resR || resR.done) throw new Error('s5 connect no response');
+    if (!resR?.value || resR.done) throw new Error('s5 connect no response');
     const res = resR.value;
-    if (res[0] !== 0x05 || res[1] !== 0x00) throw new Error(`connect failed: code ${res[1]}`);
+    if (res[1] !== 0) throw new Error(`connect failed: code ${res[1]}`);
     sw.releaseLock();
     sr.releaseLock();
     return s;
@@ -290,10 +286,11 @@ function pVH(b, uid) {
 }
 
 function pS5(str) {
+  str = str.replace(/^socks5?:\/\//i, '');
   const ati = str.includes('@') ? str.lastIndexOf('@') : -1, hp = ati !== -1 ? str.slice(ati + 1) : str;
   const [h, pt] = pHP(hp);
   if (ati === -1) return { u: '', p: '', h, pt };
-  const up = str.slice(0, ati), ci = up.lastIndexOf(':');
+  const up = str.slice(0, ati), ci = up.indexOf(':');
   if (ci === -1) return { u: '', p: '', h, pt };
   return { u: up.slice(0, ci), p: up.slice(ci + 1), h, pt };
 }

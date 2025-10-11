@@ -3,7 +3,6 @@
  a、订阅链接：https://<部署的域名>/<uid的值>(也可以通过?sub=sub.cmliussss.net快速切换订阅器）
  
  b、手搓节点格式：
- 
    vless://@<优选域名或ip>:<端口>?encryption=none&security=tls&sni=<部署的域名>&allowInsecure=1&&type=ws&host=<部署的域名>&path=<路径>#<备注>
  
   c、连接逻辑

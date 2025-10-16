@@ -1,15 +1,17 @@
 import { connect as c } from 'cloudflare:sockets';
 
-const VER = 'mini-2.6.3';//版本号,不必在意
-const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//UUID
-const P = 'sjc.o00o.ooo:443';//proxyip备用fallback
-const S5 = '';//格式：socks5://user:pass@host:port
-const GS5 = false;//全局socks5
-const sub = 'sub.o0w0o.qzz.io';//订阅服务器地址，项目为CM独家订阅器项目
-const uid = 'ikun';//订阅路径标识
-let mode = 1;//发送模式：1=管道传输（理论上低延迟高速度），2=队列传输（理论上应对高并发更稳）
+const VER = 'mini-2.6.4';//版本号
+const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//uuid
+const P = 'sjc.o00o.ooo:443';//proxyip，用于访问cf类受限网络时fallback
+const S5 = '';//格式为user:pass@host:port设计目的与p类似
+const GS5 = false;//全局socks5，固定ip用
+const sub = 'sub.o0w0o.qzz.io';////订阅服务器地址，项目为CM独家订阅器项目
+const uid = 'ikun';//订阅连接的路径标识
+let mode = 1;//传输模式：1=管道传输（理论上低延迟高速度），2=队列传输（理论上应对高并发更稳）
 const BUFFER_THRESHOLD = 256 * 1024;//背压参数，单位为字节
+const MAX_CHAIN = 1000;//队列模式下的Promise链最大长度
 
+const UB = Uint8Array.from(U.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16)));
 function vU(u) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(u);
 }
@@ -19,11 +21,9 @@ export default {
   async fetch(r) {
     const url = new URL(r.url);
     if (uid && url.pathname === '/' + uid) {
-      const subParam = url.searchParams.get('sub');
-      const subHost = subParam || sub;
+      const subParam = url.searchParams.get('sub'), subHost = subParam || sub;
       if (subHost) {
-        const host = url.hostname;
-        const subUrl = `https://${subHost}/sub?uuid=${U}&host=${host}`;
+        const subUrl = `https://${subHost}/sub?uuid=${U}&host=${url.hostname}`;
         return Response.redirect(subUrl, 301);
       }
     }
@@ -57,7 +57,7 @@ async function vWS(r, px, s5, gs5) {
           try { await w.write(d); } finally { w.releaseLock(); }
           return;
         }
-        const p = pVH(d.buffer, U);
+        const p = pVH(d.buffer);
         if (p.err) throw new Error(p.msg);
         const { ar, pr, ri, vv, udp } = p;
         if (udp) {
@@ -91,6 +91,7 @@ async function vWS(r, px, s5, gs5) {
 async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
   const s5cfg = s5 ? pS5(s5) : null;
   let socket = null;
+  
   async function tryConnect(connectFn, h, pt) {
     const s = await connectFn(h, pt);
     if (fp?.length) {
@@ -100,14 +101,17 @@ async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
     }
     return s;
   }
+  
   async function connectDirect(h, pt) {
     const s = c({ hostname: h, port: pt });
     await s.opened;
     return s;
   }
+  
   async function connectS5(h, pt) {
     return await s5conn(h, pt, s5cfg);
   }
+  
   try {
     if (gs5 && s5cfg) {
       socket = await tryConnect(connectS5, a, p);
@@ -119,7 +123,8 @@ async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
       r2w(socket, sv, vh);
       return socket;
     } catch (e1) {
-      try { socket?.close(); } catch {} socket = null;
+      try { socket?.close(); } catch {}
+      socket = null;
     }
     if (s5cfg) {
       try {
@@ -127,7 +132,8 @@ async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
         r2w(socket, sv, vh);
         return socket;
       } catch (e2) {
-        try { socket?.close(); } catch {} socket = null;
+        try { socket?.close(); } catch {}
+        socket = null;
       }
     }
     const [ph, pp] = pHP(px, p);
@@ -138,6 +144,54 @@ async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
     try { socket?.close(); } catch {}
     try { sv?.close(); } catch {}
     throw e;
+  }
+}
+
+async function r2w(rs, sv, vh) {
+  let h = vh;
+  const r = rs.readable.getReader();
+  let sq = Promise.resolve(), chainLen = 0, closed = false;
+  
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    try { r.releaseLock(); } catch {}
+    try { rs.readable?.cancel(); } catch {}
+    try { rs.writable?.abort(); } catch {}
+    try { rs?.close(); } catch {}
+    try { sv?.close(); } catch {}
+  };
+  
+  try {
+    while (true) {
+      const { value, done } = await r.read();
+      if (done) break;
+      if (!value) continue;
+      const u = nU8(value);
+      if (h) {
+        const b = new Uint8Array(h.length + u.length);
+        b.set(h); b.set(u, h.length);
+        if (mode === 1) {
+          await throttledSend(sv, b);
+        } else {
+          sq = sq.then(() => throttledSend(sv, b));
+          if (++chainLen >= MAX_CHAIN) { await sq.catch(() => {}); sq = Promise.resolve(); chainLen = 0; }
+        }
+        h = null;
+      } else {
+        if (mode === 1) {
+          await throttledSend(sv, u);
+        } else {
+          sq = sq.then(() => throttledSend(sv, u));
+          if (++chainLen >= MAX_CHAIN) { await sq.catch(() => {}); sq = Promise.resolve(); chainLen = 0; }
+        }
+      }
+    }
+  } catch (e) {
+    if (!e.message?.includes('closed') && !e.message?.includes('aborted')) console.error('[r2w]', e.message);
+  } finally {
+    if (mode === 2) await sq.catch(() => {});
+    cleanup();
   }
 }
 
@@ -154,48 +208,10 @@ async function throttledSend(sv, data) {
   }
 }
 
-async function r2w(rs, sv, vh) {
-  let h = vh;
-  const r = rs.readable.getReader();
-  let sq = Promise.resolve(), closed = false;
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    try { r.releaseLock(); } catch {}
-    try { rs.readable?.cancel(); } catch {}
-    try { rs.writable?.abort(); } catch {}
-    try { rs?.close(); } catch {}
-    try { sv?.close(); } catch {}
-  };
-  try {
-    while (true) {
-      const { value, done } = await r.read();
-      if (done) break;
-      if (!value) continue;
-      const u = nU8(value);
-      if (h) {
-        const b = new Uint8Array(h.length + u.length);
-        b.set(h);
-        b.set(u, h.length);
-        if (mode === 1) await throttledSend(sv, b);
-        else sq = sq.then(() => throttledSend(sv, b));
-        h = null;
-      } else {
-        if (mode === 1) await throttledSend(sv, u);
-        else sq = sq.then(() => throttledSend(sv, u));
-      }
-    }
-  } catch (e) {
-    if (!e.message?.includes('closed') && !e.message?.includes('aborted')) console.error('[r2w]', e.message);
-  } finally {
-    if (mode === 2) await sq.catch(() => {});
-    cleanup();
-  }
-}
-
 async function s5conn(h, pt, s5cfg) {
   const s = c({ hostname: s5cfg.h, port: s5cfg.pt });
   let sw = null, sr = null;
+  
   try {
     await s.opened;
     sw = s.writable.getWriter();
@@ -234,6 +250,7 @@ async function s5conn(h, pt, s5cfg) {
 async function hUDP(sv, vh) {
   let hs = false;
   const ts = new TransformStream(), rd = ts.readable.getReader(), wr = ts.writable.getWriter();
+  
   rd.read().then(function proc({ done, value }) {
     if (done) { try { rd.releaseLock(); } catch {} return; }
     try {
@@ -248,13 +265,10 @@ async function hUDP(sv, vh) {
           let out;
           if (hs) {
             out = new Uint8Array(2 + dr.length);
-            out.set(lb, 0);
-            out.set(dr, 2);
+            out.set(lb, 0); out.set(dr, 2);
           } else {
             out = new Uint8Array(vh.length + 2 + dr.length);
-            out.set(vh, 0);
-            out.set(lb, vh.length);
-            out.set(dr, vh.length + 2);
+            out.set(vh, 0); out.set(lb, vh.length); out.set(dr, vh.length + 2);
             hs = true;
           }
           throttledSend(sv, out.buffer);
@@ -266,22 +280,36 @@ async function hUDP(sv, vh) {
       rd.read().then(proc);
     }
   });
-  return { w: async ch => { if (ch?.length) try { await wr.write(ch); } catch {} } };
+  
+  return {
+    w: async ch => { if (ch?.length) try { await wr.write(ch); } catch {} }
+  };
 }
 
-function pVH(b, uid) {
+function pVH(b) {
   if (!b || b.byteLength < 24) return { err: 1, msg: 'invalid header' };
   const d = new Uint8Array(b), v = d[0];
-  const ub = Uint8Array.from(uid.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16)));
-  for (let i = 0; i < 16; i++) if (d[1 + i] !== ub[i]) return { err: 1, msg: 'uuid mismatch' };
+  for (let i = 0; i < 16; i++) if (d[1 + i] !== UB[i]) return { err: 1, msg: 'uuid mismatch' };
   const ol = d[17], cmd = d[18 + ol];
   if (cmd !== 1 && cmd !== 2) return { err: 1, msg: 'invalid cmd' };
   const udp = cmd === 2, pi = 18 + ol + 1, pr = new DataView(b, pi, 2).getUint16(0);
-  let ai = pi + 2, ar = ''; const at = d[ai++];
-  if (at === 1) { ar = Array.from(d.slice(ai, ai + 4)).join('.'); ai += 4; }
-  else if (at === 2) { const alen = d[ai++]; ar = new TextDecoder().decode(b.slice(ai, ai + alen)); ai += alen; }
-  else if (at === 3) { const dv = new DataView(b, ai, 16), segs = []; for (let i = 0; i < 8; i++) segs.push(dv.getUint16(i * 2).toString(16)); ar = segs.join(':'); ai += 16; }
-  else return { err: 1, msg: 'invalid atyp' };
+  let ai = pi + 2, ar = '';
+  const at = d[ai++];
+  if (at === 1) {
+    ar = Array.from(d.slice(ai, ai + 4)).join('.');
+    ai += 4;
+  } else if (at === 2) {
+    const alen = d[ai++];
+    ar = new TextDecoder().decode(b.slice(ai, ai + alen));
+    ai += alen;
+  } else if (at === 3) {
+    const dv = new DataView(b, ai, 16), segs = [];
+    for (let i = 0; i < 8; i++) segs.push(dv.getUint16(i * 2).toString(16));
+    ar = segs.join(':');
+    ai += 16;
+  } else {
+    return { err: 1, msg: 'invalid atyp' };
+  }
   return { err: 0, ar, pr, ri: ai, vv: new Uint8Array([v]), udp };
 }
 
@@ -310,7 +338,9 @@ function b642u(b) {
     while (s.length % 4) s += '=';
     const raw = atob(s);
     return { ed: Uint8Array.from(raw, c => c.charCodeAt(0)), er: null };
-  } catch (e) { return { ed: null, er: e }; }
+  } catch (e) {
+    return { ed: null, er: e };
+  }
 }
 
 function mRS(ws, eh) {

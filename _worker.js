@@ -1,366 +1,249 @@
 import { connect as c } from 'cloudflare:sockets';
 
-const VER = 'mini-2.6.4';//版本号
-const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//uuid
+const VER = 'mini-2.6.6';//版本号仅做标记，无实际作用
+const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//标准uuid格式
 const P = 'sjc.o00o.ooo:443';//proxyip，用于访问cf类受限网络时fallback
 const S5 = '';//格式为user:pass@host:port设计目的与p类似
 const GS5 = false;//全局socks5，固定ip用
-const sub = 'sub.o0w0o.qzz.io';////订阅服务器地址，项目为CM独家订阅器项目
+const sub = 'sub.o0w0o.qzz.io';//订阅服务器地址，项目为CM独家订阅器项目
 const uid = 'ikun';//订阅连接的路径标识
-let mode = 1;//传输模式：1=管道传输（理论上低延迟高速度），2=队列传输（理论上应对高并发更稳）
-const BUFFER_THRESHOLD = 256 * 1024;//背压参数，单位为字节
-const MAX_CHAIN = 1000;//队列模式下的Promise链最大长度
-
+const BUFFERED_THRESHOLD = 256 * 1024;//背压参数，单位为字节
 const UB = Uint8Array.from(U.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16)));
-function vU(u) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(u);
-}
-if (!vU(U)) throw new Error('Bad UUID');
+function vU(u){return/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(u);}
+if(!vU(U))throw new Error('Bad UUID');
 
-export default {
-  async fetch(r) {
-    const url = new URL(r.url);
-    if (uid && url.pathname === '/' + uid) {
-      const subParam = url.searchParams.get('sub'), subHost = subParam || sub;
-      if (subHost) {
-        const subUrl = `https://${subHost}/sub?uuid=${U}&host=${url.hostname}`;
-        return Response.redirect(subUrl, 301);
-      }
-    }
-    const u = r.headers.get('Upgrade');
-    if (!u || u.toLowerCase() !== 'websocket') return Response.redirect('https://example.com', 301);
-    const tp = url.pathname + url.search, pm = tp.match(/p=([^&]*)/), sm = tp.match(/s5=([^&]*)/), gm = tp.match(/gs5=([^&]*)/);
-    const px = pm ? pm[1] : P, s5 = sm ? sm[1] : S5, gs5 = gm ? (gm[1] === '1' || (gm[1] && gm[1].toLowerCase() === 'true')) : GS5;
-    return vWS(r, px, s5, gs5);
-  }
+export default{
+async fetch(r){
+const u=new URL(r.url);
+if(uid&&u.pathname==='/'+uid){const sh=u.searchParams.get('sub')||sub;if(sh)return Response.redirect(`https://${sh}/sub?uuid=${U}&host=${u.hostname}`,301);}
+const up=r.headers.get('Upgrade');
+if(!up||up.toLowerCase()!=='websocket')return Response.redirect('https://example.com',301);
+const tp=u.pathname+u.search,pm=tp.match(/p=([^&]*)/),sm=tp.match(/s5=([^&]*)/),gm=tp.match(/gs5=([^&]*)/);
+const px=pm?pm[1]:P,s5=sm?sm[1]:S5,gs5=gm?(gm[1]==='1'||gm[1]&&gm[1].toLowerCase()==='true'):GS5;
+return vWS(r,px,s5,gs5);
+}};
+
+function safeClose(o){try{o&&typeof o.close==='function'&&o.close();}catch{}}
+function ensureU8(x){if(!x)return new Uint8Array(0);if(x instanceof Uint8Array)return x;if(x instanceof ArrayBuffer)return new Uint8Array(x);if(ArrayBuffer.isView(x))return new Uint8Array(x.buffer,x.byteOffset,x.byteLength);return new Uint8Array(0);}
+function base64ToUint8(b){if(!b)return{ed:null,er:null};try{let s=b.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s);return{ed:Uint8Array.from(r,c=>c.charCodeAt(0)),er:null};}catch(e){return{ed:null,er:e};}}
+function parseHostPort(s,d=443){if(!s)return[null,d];if(s.includes(']:')){const p=s.split(']:');return[p[0]+']',Number(p[1])||d];}const p=s.split(':');if(p.length===2)return[p[0],Number(p[1])||d];return[s,d];}
+
+async function vWS(r,px,s5,gs5){
+const wp=new WebSocketPair(),cl=wp[0],sv=wp[1];sv.accept();
+const eh=r.headers.get('sec-websocket-protocol')||'',rs=mRS(sv,eh);
+let remoteSocket=null,dnsWriter=null,dnsMode=false;
+const clean=()=>{safeClose(sv);safeClose(remoteSocket);};
+rs.pipeTo(new WritableStream({
+async write(ch){
+const d=ensureU8(ch);if(!d.length)return;
+if(dnsMode&&dnsWriter){dnsWriter(d);return;}
+if(remoteSocket){const w=remoteSocket.writable.getWriter();try{await w.write(d);}finally{w.releaseLock();}return;}
+const p=pVH(d.buffer);if(p.err)throw new Error(p.msg);
+const{ar,pr,ri,vv,udp}=p;
+if(udp){if(pr!==53)throw new Error('udp only 53');dnsMode=true;const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri),h=await hUDP(sv,vh);dnsWriter=h.write;if(ip.length)dnsWriter(ip);return;}
+const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri);
+hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>remoteSocket=s).catch(e=>{if(!e.message?.includes('closed'))console.error('[hTCP]',e.message);clean();});
+},
+close(){clean();},
+abort(){clean();}
+})).catch(e=>{if(!/closed|aborted/i.test(e.message))console.error('[WS pipe]',e.message);clean();});
+return new Response(null,{status:101,webSocket:cl});
+}
+
+async function hTCP(a,p,fp,sv,vh,px,s5,gs5){
+const s5cfg=s5?pS5(s5):null;
+async function cD(h,pt){const s=c({hostname:h,port:pt});await s.opened;return s;}
+async function cS5(h,pt){return await s5conn(h,pt,s5cfg);}
+let sock=null;
+try{
+if(gs5&&s5cfg){
+sock=await cS5(a,p);
+if(fp?.length){const w=sock.writable.getWriter();await w.write(fp);w.releaseLock();}
+r2w(sock,sv,vh,null);
+return sock;
+}
+try{
+sock=await cD(a,p);
+if(fp?.length){const w=sock.writable.getWriter();await w.write(fp);w.releaseLock();}
+async function retry(){
+try{sock?.close();}catch{}
+if(s5cfg){
+try{
+const retryS=await cS5(a,p);
+if(fp?.length){const w=retryS.writable.getWriter();await w.write(fp);w.releaseLock();}
+retryS.closed.catch(e=>console.error('[retry s5 closed]',e)).finally(()=>safeClose(sv));
+r2w(retryS,sv,vh,null);
+return;
+}catch(e){
+console.error('[retry s5]',e.message);
+try{sock?.close();}catch{}
+sock=null;
+}
+}
+const[ph,pp]=parseHostPort(px,p);
+const retryP=await cD(ph,pp);
+if(fp?.length){const w=retryP.writable.getWriter();await w.write(fp);w.releaseLock();}
+retryP.closed.catch(e=>console.error('[retry p closed]',e)).finally(()=>safeClose(sv));
+r2w(retryP,sv,vh,null);
+}
+r2w(sock,sv,vh,retry);
+return sock;
+}catch{
+try{sock?.close();}catch{}
+sock=null;
+}
+if(s5cfg){
+try{
+sock=await cS5(a,p);
+if(fp?.length){const w=sock.writable.getWriter();await w.write(fp);w.releaseLock();}
+r2w(sock,sv,vh,null);
+return sock;
+}catch{
+try{sock?.close();}catch{}
+sock=null;
+}
+}
+const[ph,pp]=parseHostPort(px,p);
+sock=await cD(ph,pp);
+if(fp?.length){const w=sock.writable.getWriter();await w.write(fp);w.releaseLock();}
+r2w(sock,sv,vh,null);
+return sock;
+}catch(e){
+try{sock?.close();}catch{}
+try{sv?.close();}catch{}
+throw e;
+}
+}
+
+async function r2w(rs,sv,vh,retryFn){
+let header=vh,hasIncomingData=false;
+await rs.readable.pipeTo(new WritableStream({
+async write(ch){
+hasIncomingData=true;
+const u=ensureU8(ch);if(!u.length)return;
+if(sv.readyState!==1)throw new Error('websocket not open');
+await throttleIfBuffered(sv);
+if(header){const b=await new Blob([header,u]).arrayBuffer();sv.send(b);header=null;}
+else sv.send(u);
+},
+close(){safeClose(sv);},
+abort(){safeClose(sv);}
+})).catch(e=>{if(!/closed|aborted/i.test(e.message))console.error('[r2w pipe]',e.message);safeClose(sv);});
+if(hasIncomingData===false&&retryFn){
+retryFn();
+}
+}
+
+async function throttleIfBuffered(ws){
+try{while(typeof ws.bufferedAmount==='number'&&ws.bufferedAmount>BUFFERED_THRESHOLD){await new Promise(r=>setTimeout(r,10));if(ws.readyState!==1)return;}}catch{}
+}
+
+async function s5conn(h,pt,s5cfg){
+const s=c({hostname:s5cfg.h,port:s5cfg.pt});let sw=null,sr=null;
+try{
+await s.opened;sw=s.writable.getWriter();sr=s.readable.getReader();
+await sw.write(new Uint8Array([5,2,0,2]));
+const arR=await sr.read();if(!arR?.value||arR.done)throw new Error('s5 no auth response');
+const ar=arR.value;if(ar[1]===2){if(!s5cfg.u||!s5cfg.p)throw new Error('auth required');
+const uE=new TextEncoder().encode(s5cfg.u),pE=new TextEncoder().encode(s5cfg.p);
+await sw.write(new Uint8Array([1,uE.length,...uE,pE.length,...pE]));
+const aprR=await sr.read();if(!aprR?.value||aprR.done)throw new Error('s5 auth no response');
+const apr=aprR.value;if(apr[1]!==0)throw new Error('auth failed');}
+const dom=new TextEncoder().encode(h);
+await sw.write(new Uint8Array([5,1,0,3,dom.length,...dom,pt>>8,pt&255]));
+const resR=await sr.read();if(!resR?.value||resR.done)throw new Error('s5 connect no response');
+const res=resR.value;if(res[1]!==0)throw new Error(`connect failed: code ${res[1]}`);
+sw.releaseLock();sr.releaseLock();return s;
+}catch(e){try{sw?.releaseLock();}catch{}try{sr?.releaseLock();}catch{}try{s?.close();}catch{}throw e;}
+}
+
+async function hUDP(sv,vh){
+let sentHeader=false;
+const transformStream=new TransformStream({
+start(controller){},
+transform(chunk,controller){
+const data=ensureU8(chunk);
+for(let index=0;index<data.byteLength;){
+if(index+2>data.byteLength)break;
+const lengthBuffer=data.slice(index,index+2);
+const udpPacketLength=new DataView(lengthBuffer.buffer,lengthBuffer.byteOffset,2).getUint16(0);
+if(index+2+udpPacketLength>data.byteLength)break;
+const udpData=data.slice(index+2,index+2+udpPacketLength);
+index=index+2+udpPacketLength;
+controller.enqueue(udpData);
+}
+},
+flush(controller){}
+});
+transformStream.readable.pipeTo(new WritableStream({
+async write(chunk){
+try{
+const dnsQuery=ensureU8(chunk);
+if(!dnsQuery||dnsQuery.length===0)return;
+const resp=await fetch('https://1.1.1.1/dns-query',{
+method:'POST',
+headers:{'content-type':'application/dns-message'},
+body:dnsQuery
+});
+const dnsResult=new Uint8Array(await resp.arrayBuffer());
+const udpSize=dnsResult.byteLength;
+const udpSizeBuffer=new Uint8Array([(udpSize>>8)&0xff,udpSize&0xff]);
+if(sv.readyState===1){
+await throttleIfBuffered(sv);
+if(sentHeader){
+sv.send(await new Blob([udpSizeBuffer,dnsResult]).arrayBuffer());
+}else{
+sv.send(await new Blob([vh,udpSizeBuffer,dnsResult]).arrayBuffer());
+sentHeader=true;
+}
+}
+}catch(e){
+if(!e.message?.includes('closed'))console.error('[dns query]',e.message);
+}
+},
+close(){},
+abort(reason){console.error('[dns stream abort]',reason);}
+})).catch(e=>{
+if(!e.message?.includes('closed'))console.error('[dns udp]',e.message);
+});
+const writer=transformStream.writable.getWriter();
+return{
+write:async(ch)=>{
+try{
+await writer.write(ch);
+}catch(e){
+if(!e.message?.includes('closed'))console.error('[dns write]',e.message);
+}
+}
 };
-
-async function vWS(r, px, s5, gs5) {
-  const wp = new WebSocketPair(), cl = wp[0], sv = wp[1];
-  sv.accept();
-  const eh = r.headers.get('sec-websocket-protocol') || '', rs = mRS(sv, eh);
-  let rSocket = null, uw = null, dns = false, closed = false;
-  const closeAll = () => {
-    if (closed) return;
-    closed = true;
-    try { sv?.close(); } catch {}
-    try { rSocket?.close(); } catch {}
-  };
-  const pipeTask = rs.pipeTo(new WritableStream({
-    async write(ch) {
-      try {
-        const d = nU8(ch);
-        if (!d.length) return;
-        if (dns && uw) { uw(d); return; }
-        if (rSocket) {
-          const w = rSocket.writable.getWriter();
-          try { await w.write(d); } finally { w.releaseLock(); }
-          return;
-        }
-        const p = pVH(d.buffer);
-        if (p.err) throw new Error(p.msg);
-        const { ar, pr, ri, vv, udp } = p;
-        if (udp) {
-          if (pr !== 53) throw new Error('udp only 53');
-          dns = true;
-          const vh = new Uint8Array([vv[0], 0]), ip = d.slice(ri), w = await hUDP(sv, vh);
-          uw = w.w.bind(w);
-          if (ip.length) uw(ip);
-          return;
-        }
-        const vh = new Uint8Array([vv[0], 0]), ip = d.slice(ri);
-        hTCP(ar, pr, ip, sv, vh, px, s5, gs5).then(s => rSocket = s).catch(e => {
-          if (!e.message?.includes('closed')) console.error('[hTCP]', e.message);
-          closeAll();
-        });
-      } catch (e) {
-        if (!e.message?.includes('closed') && !e.message?.includes('aborted')) console.error('[WS write]', e.message);
-        closeAll();
-        throw e;
-      }
-    },
-    close() { closeAll(); },
-    abort(reason) { closeAll(); }
-  })).catch(e => {
-    if (!e.message?.includes('closed') && !e.message?.includes('aborted')) console.error('[WS pipe]', e.message);
-    closeAll();
-  });
-  return new Response(null, { status: 101, webSocket: cl });
 }
 
-async function hTCP(a, p, fp, sv, vh, px, s5, gs5) {
-  const s5cfg = s5 ? pS5(s5) : null;
-  let socket = null;
-  
-  async function tryConnect(connectFn, h, pt) {
-    const s = await connectFn(h, pt);
-    if (fp?.length) {
-      const w = s.writable.getWriter();
-      await w.write(fp);
-      w.releaseLock();
-    }
-    return s;
-  }
-  
-  async function connectDirect(h, pt) {
-    const s = c({ hostname: h, port: pt });
-    await s.opened;
-    return s;
-  }
-  
-  async function connectS5(h, pt) {
-    return await s5conn(h, pt, s5cfg);
-  }
-  
-  try {
-    if (gs5 && s5cfg) {
-      socket = await tryConnect(connectS5, a, p);
-      r2w(socket, sv, vh);
-      return socket;
-    }
-    try {
-      socket = await tryConnect(connectDirect, a, p);
-      r2w(socket, sv, vh);
-      return socket;
-    } catch (e1) {
-      try { socket?.close(); } catch {}
-      socket = null;
-    }
-    if (s5cfg) {
-      try {
-        socket = await tryConnect(connectS5, a, p);
-        r2w(socket, sv, vh);
-        return socket;
-      } catch (e2) {
-        try { socket?.close(); } catch {}
-        socket = null;
-      }
-    }
-    const [ph, pp] = pHP(px, p);
-    socket = await tryConnect(connectDirect, ph, pp);
-    r2w(socket, sv, vh);
-    return socket;
-  } catch (e) {
-    try { socket?.close(); } catch {}
-    try { sv?.close(); } catch {}
-    throw e;
-  }
+function pVH(b){
+if(!b||b.byteLength<24)return{err:1,msg:'invalid header'};
+const d=new Uint8Array(b),v=d[0];for(let i=0;i<16;i++)if(d[1+i]!==UB[i])return{err:1,msg:'uuid mismatch'};
+const ol=d[17],cmd=d[18+ol];if(cmd!==1&&cmd!==2)return{err:1,msg:'invalid cmd'};
+const udp=cmd===2,pi=18+ol+1,pr=new DataView(b,pi,2).getUint16(0);let ai=pi+2,ar='',at=d[ai++];
+if(at===1){ar=Array.from(d.slice(ai,ai+4)).join('.');ai+=4;}
+else if(at===2){const al=d[ai++];ar=new TextDecoder().decode(b.slice(ai,ai+al));ai+=al;}
+else if(at===3){const dv=new DataView(b,ai,16),sg=[];for(let i=0;i<8;i++)sg.push(dv.getUint16(i*2).toString(16));ar=sg.join(':');ai+=16;}
+else return{err:1,msg:'invalid atyp'};
+return{err:0,ar,pr,ri:ai,vv:new Uint8Array([v]),udp};
 }
 
-async function r2w(rs, sv, vh) {
-  let h = vh;
-  const r = rs.readable.getReader();
-  let sq = Promise.resolve(), chainLen = 0, closed = false;
-  
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    try { r.releaseLock(); } catch {}
-    try { rs.readable?.cancel(); } catch {}
-    try { rs.writable?.abort(); } catch {}
-    try { rs?.close(); } catch {}
-    try { sv?.close(); } catch {}
-  };
-  
-  try {
-    while (true) {
-      const { value, done } = await r.read();
-      if (done) break;
-      if (!value) continue;
-      const u = nU8(value);
-      if (h) {
-        const b = new Uint8Array(h.length + u.length);
-        b.set(h); b.set(u, h.length);
-        if (mode === 1) {
-          await throttledSend(sv, b);
-        } else {
-          sq = sq.then(() => throttledSend(sv, b));
-          if (++chainLen >= MAX_CHAIN) { await sq.catch(() => {}); sq = Promise.resolve(); chainLen = 0; }
-        }
-        h = null;
-      } else {
-        if (mode === 1) {
-          await throttledSend(sv, u);
-        } else {
-          sq = sq.then(() => throttledSend(sv, u));
-          if (++chainLen >= MAX_CHAIN) { await sq.catch(() => {}); sq = Promise.resolve(); chainLen = 0; }
-        }
-      }
-    }
-  } catch (e) {
-    if (!e.message?.includes('closed') && !e.message?.includes('aborted')) console.error('[r2w]', e.message);
-  } finally {
-    if (mode === 2) await sq.catch(() => {});
-    cleanup();
-  }
+function pS5(s){
+s=s.replace(/^socks5?:\/\//i,'');const at=s.includes('@')?s.lastIndexOf('@'):-1,hp=at!==-1?s.slice(at+1):s;const[h,pt]=parseHostPort(hp);
+if(at===-1)return{u:'',p:'',h,pt};const up=s.slice(0,at),ci=up.indexOf(':');if(ci===-1)return{u:'',p:'',h,pt};
+return{u:up.slice(0,ci),p:up.slice(ci+1),h,pt};
 }
 
-async function throttledSend(sv, data) {
-  if (!sv || sv.readyState !== 1 || data == null) return;
-  while (sv.bufferedAmount > BUFFER_THRESHOLD) {
-    await new Promise(r => setTimeout(r, 10));
-    if (sv.readyState !== 1) return;
-  }
-  try {
-    sv.send(data);
-  } catch (e) {
-    if (!e.message?.includes('closed')) console.error('[WS send]', e.message);
-  }
-}
-
-async function s5conn(h, pt, s5cfg) {
-  const s = c({ hostname: s5cfg.h, port: s5cfg.pt });
-  let sw = null, sr = null;
-  
-  try {
-    await s.opened;
-    sw = s.writable.getWriter();
-    sr = s.readable.getReader();
-    await sw.write(new Uint8Array([5, 2, 0, 2]));
-    const arR = await sr.read();
-    if (!arR?.value || arR.done) throw new Error('s5 no auth response');
-    const ar = arR.value;
-    if (ar[1] === 2) {
-      if (!s5cfg.u || !s5cfg.p) throw new Error('auth required');
-      const user = new TextEncoder().encode(s5cfg.u);
-      const pass = new TextEncoder().encode(s5cfg.p);
-      await sw.write(new Uint8Array([1, user.length, ...user, pass.length, ...pass]));
-      const aprR = await sr.read();
-      if (!aprR?.value || aprR.done) throw new Error('s5 auth no response');
-      const apr = aprR.value;
-      if (apr[1] !== 0) throw new Error('auth failed');
-    }
-    const domain = new TextEncoder().encode(h);
-    await sw.write(new Uint8Array([5, 1, 0, 3, domain.length, ...domain, pt >> 8, pt & 0xff]));
-    const resR = await sr.read();
-    if (!resR?.value || resR.done) throw new Error('s5 connect no response');
-    const res = resR.value;
-    if (res[1] !== 0) throw new Error(`connect failed: code ${res[1]}`);
-    sw.releaseLock();
-    sr.releaseLock();
-    return s;
-  } catch (e) {
-    try { sw?.releaseLock(); } catch {}
-    try { sr?.releaseLock(); } catch {}
-    try { s?.close(); } catch {}
-    throw e;
-  }
-}
-
-async function hUDP(sv, vh) {
-  let hs = false;
-  const ts = new TransformStream(), rd = ts.readable.getReader(), wr = ts.writable.getWriter();
-  
-  rd.read().then(function proc({ done, value }) {
-    if (done) { try { rd.releaseLock(); } catch {} return; }
-    try {
-      const d = nU8(value);
-      if (!d || d.length < 2) { rd.read().then(proc); return; }
-      const len = (d[0] << 8) | d[1];
-      if (d.length < 2 + len) { rd.read().then(proc); return; }
-      const q = d.slice(2, 2 + len);
-      fetch('https://1.1.1.1/dns-query', { method: 'POST', headers: { 'content-type': 'application/dns-message' }, body: q })
-        .then(async res => {
-          const dr = new Uint8Array(await res.arrayBuffer()), lb = new Uint8Array([(dr.length >> 8) & 255, dr.length & 255]);
-          let out;
-          if (hs) {
-            out = new Uint8Array(2 + dr.length);
-            out.set(lb, 0); out.set(dr, 2);
-          } else {
-            out = new Uint8Array(vh.length + 2 + dr.length);
-            out.set(vh, 0); out.set(lb, vh.length); out.set(dr, vh.length + 2);
-            hs = true;
-          }
-          throttledSend(sv, out.buffer);
-        })
-        .catch(e => { if (!e.message?.includes('closed')) console.error('[DNS]', e.message); })
-        .finally(() => rd.read().then(proc));
-    } catch (e) {
-      if (!e.message?.includes('closed')) console.error('[UDP proc]', e.message);
-      rd.read().then(proc);
-    }
-  });
-  
-  return {
-    w: async ch => { if (ch?.length) try { await wr.write(ch); } catch {} }
-  };
-}
-
-function pVH(b) {
-  if (!b || b.byteLength < 24) return { err: 1, msg: 'invalid header' };
-  const d = new Uint8Array(b), v = d[0];
-  for (let i = 0; i < 16; i++) if (d[1 + i] !== UB[i]) return { err: 1, msg: 'uuid mismatch' };
-  const ol = d[17], cmd = d[18 + ol];
-  if (cmd !== 1 && cmd !== 2) return { err: 1, msg: 'invalid cmd' };
-  const udp = cmd === 2, pi = 18 + ol + 1, pr = new DataView(b, pi, 2).getUint16(0);
-  let ai = pi + 2, ar = '';
-  const at = d[ai++];
-  if (at === 1) {
-    ar = Array.from(d.slice(ai, ai + 4)).join('.');
-    ai += 4;
-  } else if (at === 2) {
-    const alen = d[ai++];
-    ar = new TextDecoder().decode(b.slice(ai, ai + alen));
-    ai += alen;
-  } else if (at === 3) {
-    const dv = new DataView(b, ai, 16), segs = [];
-    for (let i = 0; i < 8; i++) segs.push(dv.getUint16(i * 2).toString(16));
-    ar = segs.join(':');
-    ai += 16;
-  } else {
-    return { err: 1, msg: 'invalid atyp' };
-  }
-  return { err: 0, ar, pr, ri: ai, vv: new Uint8Array([v]), udp };
-}
-
-function pS5(str) {
-  str = str.replace(/^socks5?:\/\//i, '');
-  const ati = str.includes('@') ? str.lastIndexOf('@') : -1, hp = ati !== -1 ? str.slice(ati + 1) : str;
-  const [h, pt] = pHP(hp);
-  if (ati === -1) return { u: '', p: '', h, pt };
-  const up = str.slice(0, ati), ci = up.indexOf(':');
-  if (ci === -1) return { u: '', p: '', h, pt };
-  return { u: up.slice(0, ci), p: up.slice(ci + 1), h, pt };
-}
-
-function nU8(x) {
-  if (!x) return new Uint8Array(0);
-  if (x instanceof Uint8Array) return x;
-  if (x instanceof ArrayBuffer) return new Uint8Array(x);
-  if (ArrayBuffer.isView(x)) return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
-  return new Uint8Array(0);
-}
-
-function b642u(b) {
-  if (!b) return { ed: null, er: null };
-  try {
-    let s = b.replace(/-/g, '+').replace(/_/g, '/');
-    while (s.length % 4) s += '=';
-    const raw = atob(s);
-    return { ed: Uint8Array.from(raw, c => c.charCodeAt(0)), er: null };
-  } catch (e) {
-    return { ed: null, er: e };
-  }
-}
-
-function mRS(ws, eh) {
-  let closed = false;
-  return new ReadableStream({
-    start(ctrl) {
-      ws.addEventListener('message', evt => { if (!closed) ctrl.enqueue(evt.data); });
-      ws.addEventListener('close', () => { if (!closed) { closed = true; try { ctrl.close(); } catch {} } });
-      ws.addEventListener('error', err => { try { ctrl.error(err); } catch {} });
-      const { ed } = b642u(eh);
-      if (ed) ctrl.enqueue(ed);
-    },
-    cancel() { closed = true; try { ws.close(); } catch {} }
-  });
-}
-
-function pHP(s, defp = 443) {
-  if (!s) return [null, defp];
-  if (s.includes(']:')) { const parts = s.split(']:'); return [parts[0] + ']', Number(parts[1]) || defp]; }
-  const parts = s.split(':');
-  if (parts.length === 2) return [parts[0], Number(parts[1]) || defp];
-  return [s, defp];
+function mRS(ws,eh){
+let closed=false;
+return new ReadableStream({
+start(c){
+ws.addEventListener('message',e=>{if(!closed)c.enqueue(e.data);});
+ws.addEventListener('close',()=>{if(!closed){closed=true;try{c.close();}catch{}}});
+ws.addEventListener('error',e=>{try{c.error(e);}catch{}});
+const{ed}=base64ToUint8(eh);if(ed)c.enqueue(ed);
+},cancel(){closed=true;safeClose(ws);}
+});
 }

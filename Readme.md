@@ -20,7 +20,6 @@
 | `P`    | fallback 代理 IP:Port（直连失败时使用） |
 | `S5`   | SOCKS5 地址，可留空                |
 | `GS5`  | 是否启用全局 SOCKS5 模式             |
-| `mode` | 数据传输模式：1=管道传输-快、2=队列传输-稳            |
 | `VER`  | 仅作版本区分，无实际逻辑影响               |
 
 3.你可以在客户端（V2Ray / Clash 等）里配置 WebSocket 的 path，像这样：

@@ -1,3 +1,13 @@
+/*
+  一、订阅链接：https://<部署的域名>/<变量uid的值(见下方)>(也可以通过?sub=sub.cmliussss.net快速切换订阅器）
+  二、手搓节点格式：
+        vless://@<优选域名或ip>:<端口>?encryption=none&security=tls&sni=<部署的域名>&allowInsecure=1&&type=ws&host=<部署的域名>&path=<路径，例：/?ed=2560或者单独的/>#<备注>
+  三、路径设置格式
+    /?p= 或者/p=；变量支持：s5，gs5，p，连接符：&  即/p=1.2.3.4:443&s5=socks://user:pass@host:port
+  四、连接逻辑
+   1. 直连--> s5(如果有） --> p
+   2. 全局：所有流量转发s5（也就是固定节点）
+*/
 import { connect as c } from 'cloudflare:sockets';
 
 const VER = 'mini-2.6.6';//版本号仅做标记，无实际作用
@@ -7,7 +17,8 @@ const S5 = '';//格式为user:pass@host:port设计目的与p类似
 const GS5 = false;//全局socks5，固定ip用
 const sub = 'sub.o0w0o.qzz.io';//订阅服务器地址，项目为CM独家订阅器项目
 const uid = 'ikun';//订阅连接的路径标识
-const BUFFERED_THRESHOLD = 256 * 1024;//背压参数，单位为字节
+const BUFFERED_THRESHOLD = 1024 * 1024;//背压参数，单位为字节
+const WS_OPEN=1,WS_CLOSING=2;//WebSocket状态常量
 const UB = Uint8Array.from(U.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16)));
 function vU(u){return/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(u);}
 if(!vU(U))throw new Error('Bad UUID');
@@ -15,7 +26,7 @@ if(!vU(U))throw new Error('Bad UUID');
 export default{
 async fetch(r){
 const u=new URL(r.url);
-if(uid&&u.pathname==='/'+uid){const sh=u.searchParams.get('sub')||sub;if(sh)return Response.redirect(`https://${sh}/sub?uuid=${U}&host=${u.hostname}`,301);}
+if(uid&&u.pathname==='/'+uid){const sh=u.searchParams.get('sub')||sub;if(sh)return Response.redirect(`https://${sh}/sub?uuid=${U}&host=${u.hostname}`,302);}
 const up=r.headers.get('Upgrade');
 if(!up||up.toLowerCase()!=='websocket')return Response.redirect('https://example.com',301);
 const tp=u.pathname+u.search,pm=tp.match(/p=([^&]*)/),sm=tp.match(/s5=([^&]*)/),gm=tp.match(/gs5=([^&]*)/);
@@ -23,7 +34,7 @@ const px=pm?pm[1]:P,s5=sm?sm[1]:S5,gs5=gm?(gm[1]==='1'||gm[1]&&gm[1].toLowerCase
 return vWS(r,px,s5,gs5);
 }};
 
-function safeClose(o){try{o&&typeof o.close==='function'&&o.close();}catch{}}
+function safeClose(o){try{if(o&&typeof o.close==='function'){if(o.readyState===WS_OPEN||o.readyState===WS_CLOSING)o.close();}}catch{}}
 function ensureU8(x){if(!x)return new Uint8Array(0);if(x instanceof Uint8Array)return x;if(x instanceof ArrayBuffer)return new Uint8Array(x);if(ArrayBuffer.isView(x))return new Uint8Array(x.buffer,x.byteOffset,x.byteLength);return new Uint8Array(0);}
 function base64ToUint8(b){if(!b)return{ed:null,er:null};try{let s=b.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s);return{ed:Uint8Array.from(r,c=>c.charCodeAt(0)),er:null};}catch(e){return{ed:null,er:e};}}
 function parseHostPort(s,d=443){if(!s)return[null,d];if(s.includes(']:')){const p=s.split(']:');return[p[0]+']',Number(p[1])||d];}const p=s.split(':');if(p.length===2)return[p[0],Number(p[1])||d];return[s,d];}
@@ -38,15 +49,15 @@ async write(ch){
 const d=ensureU8(ch);if(!d.length)return;
 if(dnsMode&&dnsWriter){dnsWriter(d);return;}
 if(remoteSocket){const w=remoteSocket.writable.getWriter();try{await w.write(d);}finally{w.releaseLock();}return;}
-const p=pVH(d.buffer);if(p.err)throw new Error(p.msg);
+const p=pVH(d.buffer);if(p.err){throw new Error(p.msg);}
 const{ar,pr,ri,vv,udp}=p;
 if(udp){if(pr!==53)throw new Error('udp only 53');dnsMode=true;const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri),h=await hUDP(sv,vh);dnsWriter=h.write;if(ip.length)dnsWriter(ip);return;}
 const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri);
-hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>remoteSocket=s).catch(e=>{if(!e.message?.includes('closed'))console.error('[hTCP]',e.message);clean();});
+hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>remoteSocket=s).catch(e=>{if(!e.message?.includes('closed'))throw e;clean();});
 },
 close(){clean();},
 abort(){clean();}
-})).catch(e=>{if(!/closed|aborted/i.test(e.message))console.error('[WS pipe]',e.message);clean();});
+})).catch(e=>{if(!/closed|aborted/i.test(e.message))throw e;clean();});
 return new Response(null,{status:101,webSocket:cl});
 }
 
@@ -71,11 +82,11 @@ if(s5cfg){
 try{
 const retryS=await cS5(a,p);
 if(fp?.length){const w=retryS.writable.getWriter();await w.write(fp);w.releaseLock();}
-retryS.closed.catch(e=>console.error('[retry s5 closed]',e)).finally(()=>safeClose(sv));
+retryS.closed.catch(e=>{if(!e.message?.includes('closed'))throw e;}).finally(()=>safeClose(sv));
 r2w(retryS,sv,vh,null);
 return;
 }catch(e){
-console.error('[retry s5]',e.message);
+if(!e.message?.includes('closed'))throw e;
 try{sock?.close();}catch{}
 sock=null;
 }
@@ -83,7 +94,7 @@ sock=null;
 const[ph,pp]=parseHostPort(px,p);
 const retryP=await cD(ph,pp);
 if(fp?.length){const w=retryP.writable.getWriter();await w.write(fp);w.releaseLock();}
-retryP.closed.catch(e=>console.error('[retry p closed]',e)).finally(()=>safeClose(sv));
+retryP.closed.catch(e=>{if(!e.message?.includes('closed'))throw e;}).finally(()=>safeClose(sv));
 r2w(retryP,sv,vh,null);
 }
 r2w(sock,sv,vh,retry);
@@ -121,21 +132,21 @@ await rs.readable.pipeTo(new WritableStream({
 async write(ch){
 hasIncomingData=true;
 const u=ensureU8(ch);if(!u.length)return;
-if(sv.readyState!==1)throw new Error('websocket not open');
+if(sv.readyState!==WS_OPEN)throw new Error('websocket not open');
 await throttleIfBuffered(sv);
 if(header){const b=await new Blob([header,u]).arrayBuffer();sv.send(b);header=null;}
 else sv.send(u);
 },
 close(){safeClose(sv);},
 abort(){safeClose(sv);}
-})).catch(e=>{if(!/closed|aborted/i.test(e.message))console.error('[r2w pipe]',e.message);safeClose(sv);});
+})).catch(e=>{if(!/closed|aborted/i.test(e.message))throw e;safeClose(sv);});
 if(hasIncomingData===false&&retryFn){
 retryFn();
 }
 }
 
 async function throttleIfBuffered(ws){
-try{while(typeof ws.bufferedAmount==='number'&&ws.bufferedAmount>BUFFERED_THRESHOLD){await new Promise(r=>setTimeout(r,10));if(ws.readyState!==1)return;}}catch{}
+try{while(typeof ws.bufferedAmount==='number'&&ws.bufferedAmount>BUFFERED_THRESHOLD){await new Promise(r=>setTimeout(r,10));if(ws.readyState!==WS_OPEN)return;}}catch{}
 }
 
 async function s5conn(h,pt,s5cfg){
@@ -188,7 +199,7 @@ body:dnsQuery
 const dnsResult=new Uint8Array(await resp.arrayBuffer());
 const udpSize=dnsResult.byteLength;
 const udpSizeBuffer=new Uint8Array([(udpSize>>8)&0xff,udpSize&0xff]);
-if(sv.readyState===1){
+if(sv.readyState===WS_OPEN){
 await throttleIfBuffered(sv);
 if(sentHeader){
 sv.send(await new Blob([udpSizeBuffer,dnsResult]).arrayBuffer());
@@ -198,13 +209,13 @@ sentHeader=true;
 }
 }
 }catch(e){
-if(!e.message?.includes('closed'))console.error('[dns query]',e.message);
+if(!e.message?.includes('closed'))throw e;
 }
 },
 close(){},
-abort(reason){console.error('[dns stream abort]',reason);}
+abort(reason){if(reason&&!String(reason).includes('closed'))throw reason;}
 })).catch(e=>{
-if(!e.message?.includes('closed'))console.error('[dns udp]',e.message);
+if(!e.message?.includes('closed'))throw e;
 });
 const writer=transformStream.writable.getWriter();
 return{
@@ -212,7 +223,7 @@ write:async(ch)=>{
 try{
 await writer.write(ch);
 }catch(e){
-if(!e.message?.includes('closed'))console.error('[dns write]',e.message);
+if(!e.message?.includes('closed'))throw e;
 }
 }
 };
@@ -221,8 +232,10 @@ if(!e.message?.includes('closed'))console.error('[dns write]',e.message);
 function pVH(b){
 if(!b||b.byteLength<24)return{err:1,msg:'invalid header'};
 const d=new Uint8Array(b),v=d[0];for(let i=0;i<16;i++)if(d[1+i]!==UB[i])return{err:1,msg:'uuid mismatch'};
-const ol=d[17],cmd=d[18+ol];if(cmd!==1&&cmd!==2)return{err:1,msg:'invalid cmd'};
+const ol=d[17],cmd=d[18+ol];
 const udp=cmd===2,pi=18+ol+1,pr=new DataView(b,pi,2).getUint16(0);let ai=pi+2,ar='',at=d[ai++];
+if(cmd===1){/*tcp*/}else if(cmd===2){/*udp*/}
+else return{err:1,msg:`cmd ${cmd} not support, 1-tcp,2-udp`};
 if(at===1){ar=Array.from(d.slice(ai,ai+4)).join('.');ai+=4;}
 else if(at===2){const al=d[ai++];ar=new TextDecoder().decode(b.slice(ai,ai+al));ai+=al;}
 else if(at===3){const dv=new DataView(b,ai,16),sg=[];for(let i=0;i<8;i++)sg.push(dv.getUint16(i*2).toString(16));ar=sg.join(':');ai+=16;}

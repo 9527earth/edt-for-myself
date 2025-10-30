@@ -10,7 +10,7 @@
 */
 import { connect as c } from 'cloudflare:sockets';
 
-const VER = 'mini-2.6.6';//版本号仅做标记，无实际作用
+const VER = 'mini-2.6.7';//版本号仅做标记，无实际作用
 const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//标准uuid格式
 const P = 'sjc.o00o.ooo:443';//proxyip，用于访问cf类受限网络时fallback
 const S5 = '';//格式为user:pass@host:port设计目的与p类似
@@ -134,7 +134,13 @@ hasIncomingData=true;
 const u=ensureU8(ch);if(!u.length)return;
 if(sv.readyState!==WS_OPEN)throw new Error('websocket not open');
 await throttleIfBuffered(sv);
-if(header){const b=await new Blob([header,u]).arrayBuffer();sv.send(b);header=null;}
+if(header){
+const merged = new Uint8Array(header.length + u.length);
+merged.set(header, 0);
+merged.set(u, header.length);
+sv.send(merged);
+header=null;
+}
 else sv.send(u);
 },
 close(){safeClose(sv);},
@@ -260,3 +266,4 @@ const{ed}=base64ToUint8(eh);if(ed)c.enqueue(ed);
 },cancel(){closed=true;safeClose(ws);}
 });
 }
+

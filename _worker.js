@@ -10,15 +10,16 @@
 */
 import { connect as c } from 'cloudflare:sockets';
 
-const VER = 'mini-2.6.7';//版本号仅做标记，无实际作用
+const VER = 'mini-2.6.7-optimized-final';//版本号仅做标记，无实际作用
 const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//标准uuid格式
 const P = 'sjc.o00o.ooo:443';//proxyip，用于访问cf类受限网络时fallback
 const S5 = '';//格式为user:pass@host:port设计目的与p类似
 const GS5 = false;//全局socks5，固定ip用
 const sub = 'sub.o0w0o.qzz.io';//订阅服务器地址，项目为CM独家订阅器项目
 const uid = 'ikun';//订阅连接的路径标识
-const BUFFERED_THRESHOLD = 1024 * 1024;//背压参数，单位为字节
-const WS_OPEN=1,WS_CLOSING=2;//WebSocket状态常量
+const WS_OPEN=1,WS_CLOSED=3;//WebSocket状态常量
+const DEBUG = false;//调试开关，生产环境设为false
+const EMPTY_U8 = new Uint8Array(0);//共享空数组实例，减少GC压力
 const UB = Uint8Array.from(U.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16)));
 function vU(u){return/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(u);}
 if(!vU(U))throw new Error('Bad UUID');
@@ -34,10 +35,12 @@ const px=pm?pm[1]:P,s5=sm?sm[1]:S5,gs5=gm?(gm[1]==='1'||gm[1]&&gm[1].toLowerCase
 return vWS(r,px,s5,gs5);
 }};
 
-function safeClose(o){try{if(o&&typeof o.close==='function'){if(o.readyState===WS_OPEN||o.readyState===WS_CLOSING)o.close();}}catch{}}
-function ensureU8(x){if(!x)return new Uint8Array(0);if(x instanceof Uint8Array)return x;if(x instanceof ArrayBuffer)return new Uint8Array(x);if(ArrayBuffer.isView(x))return new Uint8Array(x.buffer,x.byteOffset,x.byteLength);return new Uint8Array(0);}
+function log(...args){if(DEBUG)console.error(...args);}
+function safeClose(o){try{if(o&&typeof o.close==='function'){if(o.readyState!==undefined&&o.readyState===WS_CLOSED)return;o.close();}}catch(e){log('[safeClose]',e);}}
+function ensureU8(x){if(!x)return EMPTY_U8;if(x instanceof Uint8Array)return x;if(x instanceof ArrayBuffer)return new Uint8Array(x);if(ArrayBuffer.isView(x))return new Uint8Array(x.buffer,x.byteOffset,x.byteLength);return EMPTY_U8;}
 function base64ToUint8(b){if(!b)return{ed:null,er:null};try{let s=b.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const r=atob(s);return{ed:Uint8Array.from(r,c=>c.charCodeAt(0)),er:null};}catch(e){return{ed:null,er:e};}}
 function parseHostPort(s,d=443){if(!s)return[null,d];if(s.includes(']:')){const p=s.split(']:');return[p[0]+']',Number(p[1])||d];}const p=s.split(':');if(p.length===2)return[p[0],Number(p[1])||d];return[s,d];}
+function isClosedError(e){return e&&/closed|aborted/i.test(e.message);}
 
 async function vWS(r,px,s5,gs5){
 const wp=new WebSocketPair(),cl=wp[0],sv=wp[1];sv.accept();
@@ -49,15 +52,15 @@ async write(ch){
 const d=ensureU8(ch);if(!d.length)return;
 if(dnsMode&&dnsWriter){dnsWriter(d);return;}
 if(remoteSocket){const w=remoteSocket.writable.getWriter();try{await w.write(d);}finally{w.releaseLock();}return;}
-const p=pVH(d.buffer);if(p.err){throw new Error(p.msg);}
+const p=pVH(d.buffer);if(p.err){log('[vWS parse]',p.msg);throw new Error(p.msg);}
 const{ar,pr,ri,vv,udp}=p;
 if(udp){if(pr!==53)throw new Error('udp only 53');dnsMode=true;const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri),h=await hUDP(sv,vh);dnsWriter=h.write;if(ip.length)dnsWriter(ip);return;}
 const vh=new Uint8Array([vv[0],0]),ip=d.slice(ri);
-hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>remoteSocket=s).catch(e=>{if(!e.message?.includes('closed'))throw e;clean();});
+hTCP(ar,pr,ip,sv,vh,px,s5,gs5).then(s=>remoteSocket=s).catch(e=>{if(!isClosedError(e)){log('[hTCP]',e);throw e;}clean();});
 },
 close(){clean();},
 abort(){clean();}
-})).catch(e=>{if(!/closed|aborted/i.test(e.message))throw e;clean();});
+})).catch(e=>{if(!isClosedError(e)){log('[WS pipe]',e);throw e;}clean();});
 return new Response(null,{status:101,webSocket:cl});
 }
 
@@ -82,11 +85,11 @@ if(s5cfg){
 try{
 const retryS=await cS5(a,p);
 if(fp?.length){const w=retryS.writable.getWriter();await w.write(fp);w.releaseLock();}
-retryS.closed.catch(e=>{if(!e.message?.includes('closed'))throw e;}).finally(()=>safeClose(sv));
+retryS.closed.catch(e=>{if(!isClosedError(e))log('[retry s5 closed]',e);}).finally(()=>safeClose(sv));
 r2w(retryS,sv,vh,null);
 return;
 }catch(e){
-if(!e.message?.includes('closed'))throw e;
+if(!isClosedError(e))log('[retry s5]',e);
 try{sock?.close();}catch{}
 sock=null;
 }
@@ -94,7 +97,7 @@ sock=null;
 const[ph,pp]=parseHostPort(px,p);
 const retryP=await cD(ph,pp);
 if(fp?.length){const w=retryP.writable.getWriter();await w.write(fp);w.releaseLock();}
-retryP.closed.catch(e=>{if(!e.message?.includes('closed'))throw e;}).finally(()=>safeClose(sv));
+retryP.closed.catch(e=>{if(!isClosedError(e))log('[retry p closed]',e);}).finally(()=>safeClose(sv));
 r2w(retryP,sv,vh,null);
 }
 r2w(sock,sv,vh,retry);
@@ -133,7 +136,6 @@ async write(ch){
 hasIncomingData=true;
 const u=ensureU8(ch);if(!u.length)return;
 if(sv.readyState!==WS_OPEN)throw new Error('websocket not open');
-await throttleIfBuffered(sv);
 if(header){
 const merged = new Uint8Array(header.length + u.length);
 merged.set(header, 0);
@@ -145,14 +147,10 @@ else sv.send(u);
 },
 close(){safeClose(sv);},
 abort(){safeClose(sv);}
-})).catch(e=>{if(!/closed|aborted/i.test(e.message))throw e;safeClose(sv);});
+})).catch(e=>{if(!isClosedError(e)){log('[r2w pipe]',e);throw e;}safeClose(sv);});
 if(hasIncomingData===false&&retryFn){
 retryFn();
 }
-}
-
-async function throttleIfBuffered(ws){
-try{while(typeof ws.bufferedAmount==='number'&&ws.bufferedAmount>BUFFERED_THRESHOLD){await new Promise(r=>setTimeout(r,10));if(ws.readyState!==WS_OPEN)return;}}catch{}
 }
 
 async function s5conn(h,pt,s5cfg){
@@ -206,22 +204,28 @@ const dnsResult=new Uint8Array(await resp.arrayBuffer());
 const udpSize=dnsResult.byteLength;
 const udpSizeBuffer=new Uint8Array([(udpSize>>8)&0xff,udpSize&0xff]);
 if(sv.readyState===WS_OPEN){
-await throttleIfBuffered(sv);
 if(sentHeader){
-sv.send(await new Blob([udpSizeBuffer,dnsResult]).arrayBuffer());
+const merged=new Uint8Array(udpSizeBuffer.length+dnsResult.length);
+merged.set(udpSizeBuffer,0);
+merged.set(dnsResult,udpSizeBuffer.length);
+sv.send(merged);
 }else{
-sv.send(await new Blob([vh,udpSizeBuffer,dnsResult]).arrayBuffer());
+const merged=new Uint8Array(vh.length+udpSizeBuffer.length+dnsResult.length);
+merged.set(vh,0);
+merged.set(udpSizeBuffer,vh.length);
+merged.set(dnsResult,vh.length+udpSizeBuffer.length);
+sv.send(merged);
 sentHeader=true;
 }
 }
 }catch(e){
-if(!e.message?.includes('closed'))throw e;
+if(!isClosedError(e)){log('[dns query]',e);throw e;}
 }
 },
 close(){},
-abort(reason){if(reason&&!String(reason).includes('closed'))throw reason;}
+abort(){}
 })).catch(e=>{
-if(!e.message?.includes('closed'))throw e;
+if(!isClosedError(e)){log('[dns udp]',e);throw e;}
 });
 const writer=transformStream.writable.getWriter();
 return{
@@ -229,7 +233,7 @@ write:async(ch)=>{
 try{
 await writer.write(ch);
 }catch(e){
-if(!e.message?.includes('closed'))throw e;
+if(!isClosedError(e)){log('[dns write]',e);throw e;}
 }
 }
 };
@@ -239,9 +243,8 @@ function pVH(b){
 if(!b||b.byteLength<24)return{err:1,msg:'invalid header'};
 const d=new Uint8Array(b),v=d[0];for(let i=0;i<16;i++)if(d[1+i]!==UB[i])return{err:1,msg:'uuid mismatch'};
 const ol=d[17],cmd=d[18+ol];
+if(cmd!==1&&cmd!==2)return{err:1,msg:'invalid cmd'};
 const udp=cmd===2,pi=18+ol+1,pr=new DataView(b,pi,2).getUint16(0);let ai=pi+2,ar='',at=d[ai++];
-if(cmd===1){/*tcp*/}else if(cmd===2){/*udp*/}
-else return{err:1,msg:`cmd ${cmd} not support, 1-tcp,2-udp`};
 if(at===1){ar=Array.from(d.slice(ai,ai+4)).join('.');ai+=4;}
 else if(at===2){const al=d[ai++];ar=new TextDecoder().decode(b.slice(ai,ai+al));ai+=al;}
 else if(at===3){const dv=new DataView(b,ai,16),sg=[];for(let i=0;i<8;i++)sg.push(dv.getUint16(i*2).toString(16));ar=sg.join(':');ai+=16;}
@@ -266,4 +269,3 @@ const{ed}=base64ToUint8(eh);if(ed)c.enqueue(ed);
 },cancel(){closed=true;safeClose(ws);}
 });
 }
-

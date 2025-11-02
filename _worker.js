@@ -29,7 +29,7 @@ try{
   const u=new URL(r.url);
   if(uid&&u.pathname==='/'+uid){const sh=u.searchParams.get('sub')||sub;if(sh)return Response.redirect(`https://${sh}/sub?uuid=${U}&host=${u.hostname}`,302);}
   const up=r.headers.get('Upgrade');
-  if(!up||up.toLowerCase()!=='websocket')return Response.redirect('https://example.com',301);
+  if(!up||up.toLowerCase()!=='websocket')return new Response('OK', {status: 200});
   const tp=u.pathname+u.search,pm=tp.match(/p=([^&]*)/),sm=tp.match(/s5=([^&]*)/),gm=tp.match(/gs5=([^&]*)/);
   const px=pm?pm[1]:P,s5=sm?sm[1]:S5,gs5=gm?(gm[1]==='1'||gm[1]&&gm[1].toLowerCase()==='true'):GS5;
   return vWS(r,px,s5,gs5);

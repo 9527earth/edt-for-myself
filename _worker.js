@@ -1,22 +1,23 @@
 /*
-  一、订阅链接：https://<部署的域名>/<变量uid的值(见下方)>(也可以通过?sub=sub.cmliussss.net快速切换订阅器）
-  二、手搓节点格式：
-        vless://@<优选域名或ip>:<端口>?encryption=none&security=tls&sni=<部署的域名>&allowInsecure=1&&type=ws&host=<部署的域名>&path=<路径，例：/?ed=2560或者单独的/>#<备注>
+  一、订阅链接:https://<部署的域名>/<变量uid的值(见下方)>(也可以通过?sub=sub.cmliussss.net快速切换订阅器)
+  二、手搓节点格式:
+        vless://@<优选域名或ip>:<端口>?encryption=none&security=tls&sni=<部署的域名>&allowInsecure=1&&type=ws&host=<部署的域名>&path=<路径,例:/?ed=2560或者单独的/>#<备注>
   三、路径设置格式
-    /?p= 或者/p=；变量支持：s5(支持socks5和http)，gs5，p，连接符：&  即/p=1.2.3.4:443&s5=socks://user:pass@host:port或s5=http://user:pass@host:port
+    /?p= 或者/p=;变量支持:s5(支持socks5和http),gs5,p,连接符:&  即/p=1.2.3.4:443&s5=socks://user:pass@host:port或s5=http://user:pass@host:port
   四、连接逻辑
-   1. 直连--> s5(如果有） --> p
-   2. 全局：所有流量转发s5（也就是固定节点）
+   1. 直连--> s5(如果有) --> p
+   2. 全局:所有流量转发s5(也就是固定节点)
 */
 import { connect as c } from 'cloudflare:sockets';
 
-const VER = 'mini-2.6.8-final';//版本号，无实际意义
+const VER = 'mini-2.6.8-final';//版本号,无实际意义
 const U = 'aaa6b096-1165-4bbe-935c-99f4ec902d02';//标准的uuid格式
-const P = 'sjc.o00o.ooo:443';//proxyip，用于访问cf类受限网络时fallback
+const P = 'sjc.o00o.ooo:443';//proxyip,用于访问cf类受限网络时fallback
 const S5 = '';//格式为socks5://user:pass@host:port或者http://...设计目的与p类似
-const GS5 = false;//全局socks5/http，固定ip用
-const sub = 'sub.o0w0o.qzz.io';//订阅服务器地址，项目为CM独家订阅器项目
+const GS5 = false;//全局socks5/http,固定ip用
+const sub = 'sub.o0w0o.qzz.io';//订阅服务器地址,项目为CM独家订阅器项目
 const uid = 'ikun';//订阅连接的路径标识
+const WS_OPEN=1,WS_CLOSED=3;
 const DEBUG = false; 
 const EMPTY_U8 = new Uint8Array(0);
 const UB = Uint8Array.from(U.replace(/-/g, '').match(/.{2}/g).map(x => parseInt(x, 16)));
@@ -30,8 +31,10 @@ try{
   if(uid&&u.pathname==='/'+uid){const sh=u.searchParams.get('sub')||sub;if(sh)return Response.redirect(`https://${sh}/sub?uuid=${U}&host=${u.hostname}`,302);}
   const up=r.headers.get('Upgrade');
   if(!up||up.toLowerCase()!=='websocket')return new Response('OK', {status: 200});
+  
   const tp=u.pathname+u.search,pm=tp.match(/p=([^&]*)/),sm=tp.match(/s5=([^&]*)/),gm=tp.match(/gs5=([^&]*)/);
   const px=pm?pm[1]:P,s5=sm?sm[1]:S5,gs5=gm?(gm[1]==='1'||gm[1]&&gm[1].toLowerCase()==='true'):GS5;
+  
   return vWS(r,px,s5,gs5);
 }catch(e){
   console.error('[top-level fetch error]', e?.stack || e?.message || e);
@@ -269,8 +272,12 @@ ws.addEventListener('message',e=>{if(!closed)c.enqueue(e.data);});
 ws.addEventListener('close',()=>{if(!closed){closed=true;try{c.close();}catch{}}});
 ws.addEventListener('error',e=>{try{c.error(e);}catch{}});
 const{ed,er}=base64ToUint8(eh);
-if(er){log('[protocol header decode error]',er);try{ws.close();}catch{}return;}
-else if(ed){c.enqueue(ed);}
+if(er){
+log('[protocol header decode error]',er);
+c.error(er);
+}else if(ed){
+c.enqueue(ed);
+}
 },
 cancel(){closed=true;safeClose(ws);}
 });
